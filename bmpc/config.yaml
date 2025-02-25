@@ -25,6 +25,8 @@ reanalyze_horizon: 3
 ## explore when reanalyze
 expl_log_std_min: -2
 expl_log_std_max: 1
+## imitaiton discount
+imitation_discount: 0.99
 
 # training
 steps: 10_000_000

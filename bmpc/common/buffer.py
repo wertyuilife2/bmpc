@@ -96,7 +96,7 @@ class Buffer():
 		Expects `td` to be a TensorDict with batch size TxB.
 		"""
 		td = td.select("obs", "action", "reward", "task", "expert_value", "expert_action_dist", \
-      			"episode", strict=False).to(self._device, non_blocking=True)
+      			"episode", "last_reanalyze", strict=False).to(self._device, non_blocking=True)
 		obs = td.get('obs').contiguous()
 		action = td.get('action')[1:].contiguous()
 		reward = td.get('reward')[1:].unsqueeze(-1).contiguous()
@@ -104,13 +104,15 @@ class Buffer():
 		expert_value = td.get('expert_value')[1:].unsqueeze(-1).contiguous()
 		expert_action_dist = td.get('expert_action_dist')[1:].contiguous()
 		episode = td.get('episode')[1:].contiguous()
+		last_reanalyze = td.get('last_reanalyze')[1:].unsqueeze(-1).contiguous()
 		if task is not None:
 			task = task[0].contiguous()
 		info = TensorDict({
 			"index": info['index'][0].view(-1, self.cfg.horizon+1).permute(1,0),
 			"expert_value": expert_value,
 			"expert_action_dist": expert_action_dist,
-			"episode": episode
+			"episode": episode,
+			"last_reanalyze": last_reanalyze
 		})
 		return obs, action, reward, task, info
 

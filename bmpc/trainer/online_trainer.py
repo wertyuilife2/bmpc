@@ -47,27 +47,29 @@ class OnlineTrainer(Trainer):
 			episode_success=np.nanmean(ep_successes),
 		)
 
-	def to_td(self, obs, action=None, reward=None, plan_info=None):
+	def to_td(self, obs, action=None, reward=None, act_info=None):
 		"""Creates a TensorDict for a new episode."""
 		if isinstance(obs, dict):
 			obs = TensorDict(obs, batch_size=(), device='cpu')
 		else:
 			obs = obs.unsqueeze(0).cpu()
-		if plan_info is None:
-			plan_info = TensorDict({})
+		if act_info is None:
+			act_info = TensorDict({})
 		if action is None:
 			action = torch.full_like(self.env.rand_act(), float('nan'))
 		if reward is None:
 			reward = torch.tensor(float('nan'))
-		expert_value = plan_info.get("action_value", torch.tensor(float('nan'))).squeeze().unsqueeze(0)
-		expert_action_dist = plan_info.get("action_dist", \
+		expert_value = act_info.get("action_value", torch.tensor(float('nan'))).squeeze().unsqueeze(0)
+		expert_action_dist = act_info.get("action_dist", \
 	  		torch.full(size=(1, 2*self.cfg.action_dim), fill_value=float('nan')))
+		last_reanalyze = act_info.get("last_reanalyze", torch.zeros((1,)))
 		td = TensorDict(dict(
 			obs=obs,
 			action=action.unsqueeze(0),
 			reward=reward.unsqueeze(0),
 			expert_value=expert_value,
 			expert_action_dist=expert_action_dist,
+			last_reanalyze=last_reanalyze,
 		), batch_size=(1,))
 		return td
 
@@ -110,12 +112,12 @@ class OnlineTrainer(Trainer):
 			# Collect experience
 			if self._step > self.cfg.seed_steps:
 				torch.compiler.cudagraph_mark_step_begin()
-				action, plan_info = self.agent.act(obs, t0=len(self._tds)==1)
+				action, act_info = self.agent.act(obs, t0=len(self._tds)==1)
 			else:
 				action = self.env.rand_act()
-				plan_info = None
+				act_info = None
 			obs, reward, done, info = self.env.step(action)
-			self._tds.append(self.to_td(obs, action, reward, plan_info))
+			self._tds.append(self.to_td(obs, action, reward, act_info))
 
 			# Update agent
 			if self._step >= self.cfg.seed_steps:
