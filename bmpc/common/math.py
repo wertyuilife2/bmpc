@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-
+from torch.distributions import Normal, kl_divergence
 
 def soft_ce(pred, target, cfg):
 	"""Computes the cross entropy loss between predictions and soft targets."""
@@ -92,3 +92,10 @@ def gumbel_softmax_sample(p, temperature=1.0, dim=0):
 	gumbels = (logits + gumbels) / temperature  # ~Gumbel(logits,tau)
 	y_soft = gumbels.softmax(dim)
 	return y_soft.argmax(-1)
+
+def kl_div(action_p, action_q):
+	mean_p, std_p = action_p.chunk(2, dim=-1)
+	mean_q, std_q = action_q.chunk(2, dim=-1)
+	normal1 = Normal(loc=mean_p, scale=std_p)
+	normal2 = Normal(loc=mean_q, scale=std_q)
+	return kl_divergence(normal1, normal2)

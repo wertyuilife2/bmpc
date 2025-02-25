@@ -10,6 +10,22 @@ checkpoint: ???
 eval_episodes: 10
 eval_freq: 50000
 
+# BMPC config
+bmpc: true
+## logging
+use_tensorboard: true
+eval_pi: false
+## value learning
+use_v_instead_q: true # using V with model-based TD-learning / using Q with model-free TD-learning 
+td_horizon: 1
+## lazy reanalyze
+reanalyze_interval: 10 # 0 means never reanalyze
+reanalyze_batch_size: 20 # samples that will be reanalyzed in a batch (should <= batch_size)
+reanalyze_horizon: 3
+## explore when reanalyze
+expl_log_std_min: -2
+expl_log_std_max: 1
+
 # training
 steps: 10_000_000
 batch_size: 256
@@ -40,8 +56,8 @@ max_std: 2
 temperature: 0.5
 
 # actor
-log_std_min: -10
-log_std_max: 2
+log_std_min: -3
+log_std_max: 1
 entropy_coef: 1e-4
 
 # critic
@@ -57,7 +73,7 @@ num_channels: 32
 mlp_dim: 512
 latent_dim: 512
 task_dim: 96
-num_q: 5
+num_q: 2
 dropout: 0.01
 simnorm_dim: 8
 
@@ -65,7 +81,7 @@ simnorm_dim: 8
 wandb_project: ???
 wandb_entity: ???
 wandb_silent: false
-enable_wandb: true
+enable_wandb: false
 save_csv: true
 
 # misc

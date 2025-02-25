@@ -1,5 +1,7 @@
 import dataclasses
 import re
+import os
+import datetime
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +56,8 @@ def parse_cfg(cfg: OmegaConf) -> OmegaConf:
 			pass
 
 	# Convenience
-	cfg.work_dir = Path(hydra.utils.get_original_cwd()) / 'logs' / cfg.task / str(cfg.seed) / cfg.exp_name
+	timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+	cfg.work_dir = Path(hydra.utils.get_original_cwd()) / 'logs' / cfg.exp_name / cfg.task / (str(timestamp)+'-'+str(cfg.seed))
 	cfg.task_title = cfg.task.replace("-", " ").title()
 	cfg.bin_size = (cfg.vmax - cfg.vmin) / (cfg.num_bins-1) # Bin size for discrete regression
 
@@ -77,4 +80,13 @@ def parse_cfg(cfg: OmegaConf) -> OmegaConf:
 		cfg.task_dim = 0
 	cfg.tasks = TASK_SET.get(cfg.task, [cfg.task])
 
+	# BMPC
+	if not cfg.bmpc:
+		cfg.use_v_instead_q = False
+	assert not (cfg.bmpc and cfg.multitask), "BMPC does not support multi-task for now"
+	assert not (cfg.use_tensorboard and cfg.enable_wandb), "You can only choose either WandB or TensorBoard."
 	return cfg_to_dataclass(cfg)
+
+def save_cfg(cfg: OmegaConf, dir):
+	OmegaConf.save(cfg, os.path.join(dir,'config.yaml'))
+	

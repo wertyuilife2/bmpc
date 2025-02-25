@@ -8,7 +8,7 @@ import pandas as pd
 from termcolor import colored
 
 from common import TASK_SET
-
+from torch.utils.tensorboard import SummaryWriter
 
 CONSOLE_FORMAT = [
 	("iteration", "I", "int"),
@@ -25,6 +25,10 @@ CAT_TO_COLOR = {
 	"eval": "green",
 }
 
+TENSORBOARD_LOG_CLASSES = {
+    "ignore": ["total_time", "step"],
+    "general": ["episode", "episode_reward", "episode_success"],
+}
 
 def make_dir(dir_path):
 	"""Create directory if it does not already exist."""
@@ -189,7 +193,7 @@ class Logger:
 		for k, disp_k, ty in CONSOLE_FORMAT:
 			if k in d:
 				pieces.append(f"{self._format(disp_k, d[k], ty):<22}")
-		print("   ".join(pieces))
+		print("   ".join(pieces), flush=True)
 
 	def pprint_multitask(self, d, cfg):
 		"""Pretty-print evaluation metrics for multi-task training."""
@@ -239,3 +243,86 @@ class Logger:
 				self._log_dir / "eval.csv", header=keys, index=None
 			)
 		self._print(d, category)
+
+
+class TBLogger:
+    """Logs either locally or using tensorboard."""
+
+    def __init__(self, cfg):
+        self._log_dir = make_dir(cfg.work_dir)
+        self._model_dir = make_dir(self._log_dir / "models")
+        self._save_csv = cfg.save_csv
+        self._save_agent = cfg.save_agent
+        self._group = cfg_to_group(cfg)
+        self._seed = cfg.seed
+        self._eval = []
+        self._writer = SummaryWriter(log_dir=cfg.work_dir, max_queue=1000)
+        self._video = None
+        print_run(cfg)
+
+        print(colored("Logs will be recorded by tensorboard.", "blue", attrs=["bold"]))
+        cfg.save_agent = False
+        cfg.save_video = False
+        self._wandb = None
+        self._video = None
+
+    @property
+    def video(self):
+        return self._video
+
+    @property
+    def model_dir(self):
+        return self._model_dir
+
+    def save_agent(self, agent=None, identifier="final"):
+        if self._save_agent and agent:
+            fp = self._model_dir / f"{str(identifier)}.pt"
+            agent.save(fp)
+
+    def finish(self, agent=None):
+        try:
+            self.save_agent(agent)
+        except Exception as e:
+            print(colored(f"Failed to save model: {e}", "red"))
+
+    def _format(self, key, value, ty):
+        if ty == "int":
+            return f'{colored(key + ":", "blue")} {int(value):,}'
+        elif ty == "float":
+            return f'{colored(key + ":", "blue")} {value:.01f}'
+        elif ty == "time":
+            value = str(datetime.timedelta(seconds=int(value)))
+            return f'{colored(key + ":", "blue")} {value}'
+        else:
+            raise f"invalid log format type: {ty}"
+
+    def _print(self, d, category):
+        category = colored(category, CAT_TO_COLOR[category])
+        pieces = [f" {category:<14}"]
+        for k, disp_k, ty in CONSOLE_FORMAT:
+            if k in d:
+                pieces.append(f"{self._format(disp_k, d[k], ty):<22}")
+        print("   ".join(pieces), flush=True)
+
+    def _write_tb(self, d, category):
+        """Write datas to tensorboard"""
+        for k, v in d.items():
+            if k in TENSORBOARD_LOG_CLASSES["ignore"]:
+                continue
+            if k in TENSORBOARD_LOG_CLASSES["general"]:
+                self._writer.add_scalar("{}/{}".format(category, k), v, d["step"])
+            else:
+                self._writer.add_scalar("train_metrics/{}".format(k), v, d["step"])
+        self._writer.flush()
+
+    def log(self, d, category="train"):
+        if category == "eval" and self._save_csv:
+            keys = ["step", "episode_reward"]
+            self._eval.append(np.array([d[keys[0]], d[keys[1]]]))
+            pd.DataFrame(np.array(self._eval)).to_csv(
+                self._log_dir / "eval.csv", header=keys, index=None
+            )
+        if category in CAT_TO_COLOR.keys():
+            self._print(d, category)
+        if category in ["train", "eval", "eval_pi"]:
+            self._write_tb(d, category)

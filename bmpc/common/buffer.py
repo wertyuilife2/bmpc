@@ -6,7 +6,7 @@ from torchrl.data.replay_buffers.samplers import SliceSampler
 
 class Buffer():
 	"""
-	Replay buffer for TD-MPC2 training. Based on torchrl.
+	Replay buffer for training. Based on torchrl.
 	Uses CUDA memory if available, and CPU memory otherwise.
 	"""
 
@@ -90,21 +90,38 @@ class Buffer():
 		self._num_eps += 1
 		return self._num_eps
 
-	def _prepare_batch(self, td):
+	def _prepare_batch(self, td, info):
 		"""
 		Prepare a sampled batch for training (post-processing).
 		Expects `td` to be a TensorDict with batch size TxB.
 		"""
-		td = td.select("obs", "action", "reward", "task", strict=False).to(self._device, non_blocking=True)
+		td = td.select("obs", "action", "reward", "task", "expert_value", "expert_action_dist", \
+      			"episode", strict=False).to(self._device, non_blocking=True)
 		obs = td.get('obs').contiguous()
 		action = td.get('action')[1:].contiguous()
 		reward = td.get('reward')[1:].unsqueeze(-1).contiguous()
 		task = td.get('task', None)
+		expert_value = td.get('expert_value')[1:].unsqueeze(-1).contiguous()
+		expert_action_dist = td.get('expert_action_dist')[1:].contiguous()
+		episode = td.get('episode')[1:].contiguous()
 		if task is not None:
 			task = task[0].contiguous()
-		return obs, action, reward, task
+		info = TensorDict({
+			"index": info['index'][0].view(-1, self.cfg.horizon+1).permute(1,0),
+			"expert_value": expert_value,
+			"expert_action_dist": expert_action_dist,
+			"episode": episode
+		})
+		return obs, action, reward, task, info
 
 	def sample(self):
 		"""Sample a batch of subsequences from the buffer."""
-		td = self._buffer.sample().view(-1, self.cfg.horizon+1).permute(1, 0)
-		return self._prepare_batch(td)
+		data, info = self._buffer.sample(return_info=True)
+		td = data.view(-1, self.cfg.horizon+1).permute(1, 0)
+   
+		# sanity check for memory leak of buffer (just for debugging)
+		nan_idx = torch.isnan(data['expert_action_dist'])
+		if nan_idx.sum().item() % self.cfg.action_dim != 0: 
+			print("!!!unexpected nan numbers when sample():", nan_idx.sum().item()/self.cfg.action_dim, flush=True)
+		
+		return self._prepare_batch(td, info)

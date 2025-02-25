@@ -13,14 +13,14 @@ from common.parser import parse_cfg
 from common.seed import set_seed
 from envs import make_env
 from tdmpc2 import TDMPC2
-
+from bmpc import BMPC
 torch.backends.cudnn.benchmark = True
 
 
 @hydra.main(config_name='config', config_path='.')
 def evaluate(cfg: dict):
 	"""
-	Script for evaluating a single-task / multi-task TD-MPC2 checkpoint.
+	Script for evaluating a single-task / multi-task checkpoint.
 
 	Most relevant args:
 		`task`: task name (or mt30/mt80 for multi-task evaluation)
@@ -42,6 +42,7 @@ def evaluate(cfg: dict):
 	assert torch.cuda.is_available()
 	assert cfg.eval_episodes > 0, 'Must evaluate at least 1 episode.'
 	cfg = parse_cfg(cfg)
+	print('pid:', os.getpid(), flush=True)
 	set_seed(cfg.seed)
 	print(colored(f'Task: {cfg.task}', 'blue', attrs=['bold']))
 	print(colored(f'Model size: {cfg.get("model_size", "default")}', 'blue', attrs=['bold']))
@@ -54,7 +55,8 @@ def evaluate(cfg: dict):
 	env = make_env(cfg)
 
 	# Load agent
-	agent = TDMPC2(cfg)
+	agent_cls = BMPC if cfg.bmpc else TDMPC2
+	agent = agent_cls(cfg)
 	assert os.path.exists(cfg.checkpoint), f'Checkpoint {cfg.checkpoint} not found! Must be a valid filepath.'
 	agent.load(cfg.checkpoint)
 	
@@ -77,7 +79,7 @@ def evaluate(cfg: dict):
 			if cfg.save_video:
 				frames = [env.render()]
 			while not done:
-				action = agent.act(obs, t0=t==0, task=task_idx)
+				action, _ = agent.act(obs, t0=t==0, task=task_idx)
 				obs, reward, done, info = env.step(action)
 				ep_reward += reward
 				t += 1

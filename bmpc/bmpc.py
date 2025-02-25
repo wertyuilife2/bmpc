@@ -8,10 +8,10 @@ from common.layers import api_model_conversion
 from tensordict import TensorDict
 
 
-class TDMPC2(torch.nn.Module):
+class BMPC(torch.nn.Module):
 	"""
-	TD-MPC2 agent. Implements training + inference.
-	Can be used for both single-task and multi-task experiments,
+	BMPC agent. Implements training + inference.
+	Can be used for only single-task experiments,
 	and supports both state and pixel observations.
 	"""
 
@@ -35,10 +35,11 @@ class TDMPC2(torch.nn.Module):
 		self.discount = torch.tensor(
 			[self._get_discount(ep_len) for ep_len in cfg.episode_lengths], device='cuda:0'
 		) if self.cfg.multitask else self._get_discount(cfg.episode_length)
-		self._prev_mean = torch.nn.Buffer(torch.zeros(self.cfg.horizon, self.cfg.action_dim, device=self.device))
+		self._prev_mean = torch.nn.Buffer(torch.zeros(1, self.cfg.horizon, self.cfg.action_dim, device=self.device))
 		if cfg.compile:
 			print('Compiling update function with torch.compile...')
 			self._update = torch.compile(self._update, mode="reduce-overhead")
+		self.update_count = 0
 
 	@property
 	def plan(self):
@@ -102,102 +103,119 @@ class TDMPC2(torch.nn.Module):
 
 		Returns:
 			torch.Tensor: Action to take in the environment.
+			TensorDict: Planned info.
 		"""
 		obs = obs.to(self.device, non_blocking=True).unsqueeze(0)
 		if task is not None:
 			task = torch.tensor([task], device=self.device)
 		if self.cfg.mpc:
-			return self.plan(obs, t0=t0, eval_mode=eval_mode, task=task).cpu(), None
+			action, plan_info = self.plan(obs, batch_size=1, t0=t0, eval_mode=eval_mode, task=task, horizon=self.cfg.horizon)
+			return action[0].cpu(), plan_info.cpu()
 		z = self.model.encode(obs, task)
-		action, info = self.model.pi(z, task)
+		action, pi_info = self.model.pi(z, task)
 		if eval_mode:
-			action = info["mean"]
+			action = pi_info["mean"]
 		return action[0].cpu(), None
 
 	@torch.no_grad()
-	def _estimate_value(self, z, actions, task):
+	def _estimate_value(self, z, actions, task, horizon):
 		"""Estimate value of a trajectory starting at latent state z and executing given actions."""
 		G, discount = 0, 1
-		for t in range(self.cfg.horizon):
-			reward = math.two_hot_inv(self.model.reward(z, actions[t], task), self.cfg)
-			z = self.model.next(z, actions[t], task)
+		for t in range(horizon):
+			reward = math.two_hot_inv(self.model.reward(z, actions[:, t], task), self.cfg)
+			z = self.model.next(z, actions[:, t], task)
 			G = G + discount * reward
 			discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
 			discount = discount * discount_update
-		action, _ = self.model.pi(z, task)
-		return G + discount * self.model.Q(z, action, task, return_type='avg')
+		if self.cfg.use_v_instead_q:
+			return G + discount * self.model.V(z, task, return_type="avg")
+		else:
+			action, _ = self.model.pi(z, task)
+			return G + discount * self.model.Q(z, action, task, return_type='avg')
 
 	@torch.no_grad()
-	def _plan(self, obs, t0=False, eval_mode=False, task=None):
+	def _plan(self, obs, batch_size, t0=False, eval_mode=False, task=None, horizon=None, update_prev_mean=True, reanalyze=False):
 		"""
-		Plan a sequence of actions using the learned world model.
+		Plan a batched sequence of actions using the learned world model.
 
+		Batched-plan implementation is borrowed from vectorized_env branch of tdmpc2 repo.
+		Perhaps the batch size dimension can be changed to optimize memory access performance.
+		
 		Args:
-			z (torch.Tensor): Latent state from which to plan.
+			obs (torch.Tensor): observation from which to plan.
+			batch_size (int): observation's batch size.
 			t0 (bool): Whether this is the first observation in the episode.
 			eval_mode (bool): Whether to use the mean of the action distribution.
 			task (Torch.Tensor): Task index (only used for multi-task experiments).
-
+			horizon (int): Planning horizon.
+			update_prev_mean (bool): Whether to update self._prev_mean using mean,
+				when batched plan in reanalyze, update_prev_mean should be False.
+			reanalyze (bool): Reanalyzing or not.
 		Returns:
 			torch.Tensor: Action to take in the environment.
 		"""
 		# Sample policy trajectories
 		z = self.model.encode(obs, task)
 		if self.cfg.num_pi_trajs > 0:
-			pi_actions = torch.empty(self.cfg.horizon, self.cfg.num_pi_trajs, self.cfg.action_dim, device=self.device)
-			_z = z.repeat(self.cfg.num_pi_trajs, 1)
-			for t in range(self.cfg.horizon-1):
-				pi_actions[t], _ = self.model.pi(_z, task)
-				_z = self.model.next(_z, pi_actions[t], task)
-			pi_actions[-1], _ = self.model.pi(_z, task)
+			pi_actions = torch.empty(batch_size, horizon, self.cfg.num_pi_trajs, self.cfg.action_dim, device=self.device)
+			_z = z.unsqueeze(1).repeat(1, self.cfg.num_pi_trajs, 1)
+			for t in range(horizon-1):
+				pi_actions[:,t], _ = self.model.pi(_z, task, expl=reanalyze)
+				_z = self.model.next(_z, pi_actions[:,t], task)
+			pi_actions[:,-1], _ = self.model.pi(_z, task, expl=reanalyze)
 
 		# Initialize state and parameters
-		z = z.repeat(self.cfg.num_samples, 1)
-		mean = torch.zeros(self.cfg.horizon, self.cfg.action_dim, device=self.device)
-		std = torch.full((self.cfg.horizon, self.cfg.action_dim), self.cfg.max_std, dtype=torch.float, device=self.device)
+		z = z.unsqueeze(1).repeat(1, self.cfg.num_samples, 1)
+		mean = torch.zeros(batch_size, horizon, self.cfg.action_dim, device=self.device)
+		std = self.cfg.max_std*torch.ones(batch_size, horizon, self.cfg.action_dim, device=self.device)
 		if not t0:
-			mean[:-1] = self._prev_mean[1:]
-		actions = torch.empty(self.cfg.horizon, self.cfg.num_samples, self.cfg.action_dim, device=self.device)
+			mean[:, :-1] = self._prev_mean[:, 1:]
+		actions = torch.empty(batch_size, horizon, self.cfg.num_samples, self.cfg.action_dim, device=self.device)
 		if self.cfg.num_pi_trajs > 0:
-			actions[:, :self.cfg.num_pi_trajs] = pi_actions
-
+			actions[:, :, :self.cfg.num_pi_trajs] = pi_actions
+	
 		# Iterate MPPI
 		for _ in range(self.cfg.iterations):
 
 			# Sample actions
-			r = torch.randn(self.cfg.horizon, self.cfg.num_samples-self.cfg.num_pi_trajs, self.cfg.action_dim, device=std.device)
-			actions_sample = mean.unsqueeze(1) + std.unsqueeze(1) * r
+			r = torch.randn(batch_size, horizon, self.cfg.num_samples-self.cfg.num_pi_trajs, self.cfg.action_dim, device=std.device)
+			actions_sample = mean.unsqueeze(2) + std.unsqueeze(2) * r
 			actions_sample = actions_sample.clamp(-1, 1)
-			actions[:, self.cfg.num_pi_trajs:] = actions_sample
+			actions[:, :, self.cfg.num_pi_trajs:] = actions_sample
 			if self.cfg.multitask:
 				actions = actions * self.model._action_masks[task]
 
 			# Compute elite actions
-			value = self._estimate_value(z, actions, task).nan_to_num(0)
-			elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
-			elite_value, elite_actions = value[elite_idxs], actions[:, elite_idxs]
+			value = self._estimate_value(z, actions, task, horizon).nan_to_num(0)
+			elite_idxs = torch.topk(value.squeeze(2), self.cfg.num_elites, dim=1).indices
+			elite_value = torch.gather(value, 1, elite_idxs.unsqueeze(2))
+			elite_actions = torch.gather(actions, 2, elite_idxs.unsqueeze(1).unsqueeze(3).expand(-1, horizon, -1, self.cfg.action_dim))
 
 			# Update parameters
-			max_value = elite_value.max(0).values
-			score = torch.exp(self.cfg.temperature*(elite_value - max_value))
-			score = score / score.sum(0)
-			mean = (score.unsqueeze(0) * elite_actions).sum(dim=1) / (score.sum(0) + 1e-9)
-			std = ((score.unsqueeze(0) * (elite_actions - mean.unsqueeze(1)) ** 2).sum(dim=1) / (score.sum(0) + 1e-9)).sqrt()
+			max_value = elite_value.max(1).values
+			score = torch.exp(self.cfg.temperature*(elite_value - max_value.unsqueeze(1)))
+			score = (score / score.sum(1, keepdim=True))
+			mean = (score.unsqueeze(1) * elite_actions).sum(2) / (score.sum(1, keepdim=True) + 1e-9)
+			std = ((score.unsqueeze(1) * (elite_actions - mean.unsqueeze(2)) ** 2).sum(2) / (score.sum(1, keepdim=True) + 1e-9)).sqrt()
 			std = std.clamp(self.cfg.min_std, self.cfg.max_std)
 			if self.cfg.multitask:
 				mean = mean * self.model._action_masks[task]
 				std = std * self.model._action_masks[task]
 
 		# Select action
-		rand_idx = math.gumbel_softmax_sample(score.squeeze(1))  # gumbel_softmax_sample is compatible with cuda graphs
-		actions = torch.index_select(elite_actions, 1, rand_idx).squeeze(1)
-		a, std = actions[0], std[0]
+		rand_idx = math.gumbel_softmax_sample(score.squeeze(2), dim=1)  # gumbel_softmax_sample is compatible with cuda graphs
+		actions = elite_actions[torch.arange(batch_size), :, rand_idx]
+		action_value = elite_value[torch.arange(batch_size), rand_idx]
+		action_dist = torch.cat([actions[:,0],std[:,0]], dim=-1)
+		action, std = actions[:, 0], std[:, 0]
 		if not eval_mode:
-			a = a + std * torch.randn(self.cfg.action_dim, device=std.device)
-		self._prev_mean.copy_(mean)
-		return a.clamp(-1, 1)
+			action = action + std * torch.randn(self.cfg.action_dim, device=std.device)
+		if update_prev_mean:
+			self._prev_mean.copy_(mean)
+		info = TensorDict({"action_value": action_value, "action_dist": action_dist})
+		return action.clamp(-1, 1), info
 
-	def update_pi(self, zs, task):
+	def update_pi(self, zs, expert_action_dist, task):
 		"""
 		Update policy using a sequence of latent states.
 
@@ -208,14 +226,15 @@ class TDMPC2(torch.nn.Module):
 		Returns:
 			float: Loss of the policy update.
 		"""
-		action, info = self.model.pi(zs, task)
-		qs = self.model.Q(zs, action, task, return_type='avg', detach=True)
-		self.scale.update(qs[0])
-		qs = self.scale(qs)
-
+		_, info = self.model.pi(zs[:-1], task)
+		actions_dist = torch.cat([info["mean"], info["log_std"].exp()], dim=-1)
+		kl_loss = math.kl_div(actions_dist, expert_action_dist).mean(-1, keepdim=True)
+		self.scale.update(kl_loss[0])
+		kl_loss = self.scale(kl_loss)
+  
 		# Loss is a weighted sum of Q-values
-		rho = torch.pow(self.cfg.rho, torch.arange(len(qs), device=self.device))
-		pi_loss = (-(self.cfg.entropy_coef * info["scaled_entropy"] + qs).mean(dim=(1,2)) * rho).mean()
+		rho = torch.pow(self.cfg.rho, torch.arange(len(kl_loss), device=self.device))
+		pi_loss = ((kl_loss - self.cfg.entropy_coef * info["scaled_entropy"]).mean(dim=(1,2)) * rho).mean()
 		pi_loss.backward()
 		pi_grad_norm = torch.nn.utils.clip_grad_norm_(self.model._pi.parameters(), self.cfg.grad_clip_norm)
 		self.pi_optim.step()
@@ -227,11 +246,12 @@ class TDMPC2(torch.nn.Module):
 			"pi_entropy": info["entropy"],
 			"pi_scaled_entropy": info["scaled_entropy"],
 			"pi_scale": self.scale.value,
+			"pi_log_std": info["log_std"],
 		})
 		return info
 
 	@torch.no_grad()
-	def _td_target(self, next_z, reward, task):
+	def _td_target_Q(self, next_z, reward, task):
 		"""
 		Compute the TD-target from a reward and the observation at the following time step.
 
@@ -245,14 +265,43 @@ class TDMPC2(torch.nn.Module):
 		"""
 		action, _ = self.model.pi(next_z, task)
 		discount = self.discount[task].unsqueeze(-1) if self.cfg.multitask else self.discount
-		return reward + discount * self.model.Q(next_z, action, task, return_type='min', target=True)
+		return reward + discount * self.model.Q(next_z, action, task, return_type='avg', target=True)
 
-	def _update(self, obs, action, reward, task=None):
+	@torch.no_grad()
+	def _td_target_V(self, zs, task):
+		"""
+		Compute the TD-target using learned model.
+
+		Args:
+			zs (torch.Tensor): Latent state from observation.
+			task (torch.Tensor): Task index (only used for multi-task experiments).
+
+		Returns:
+			torch.Tensor: TD-target.
+		"""
+
+		Gs, discount = 0, 1
+		zs_ = zs.clone()
+		for _ in range(self.cfg.td_horizon):
+			actions, _ = self.model.pi(zs_, task)
+			rewards = math.two_hot_inv(self.model.reward(zs_, actions, task), self.cfg)
+			zs_ = self.model.next(zs_, actions, task)
+			Gs += discount * rewards
+			discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
+			discount = discount * discount_update
+		td_target = Gs + discount * self.model.V(zs_, task, return_type="avg", target=True)
+		return td_target
+	
+	def _update(self, obs, action, reward, expert_action_dist, task=None, pretrain=False):
 		# Compute targets
 		with torch.no_grad():
-			next_z = self.model.encode(obs[1:], task)
-			td_targets = self._td_target(next_z, reward, task)
-
+			true_zs = self.model.encode(obs, task) # latent from real obs
+			next_z = true_zs[1:]
+			if self.cfg.use_v_instead_q:
+				td_targets = self._td_target_V(true_zs[:-1], task)
+			else:
+				td_targets = self._td_target_Q(next_z, reward, task)
+	
 		# Prepare for update
 		self.model.train()
 
@@ -268,7 +317,10 @@ class TDMPC2(torch.nn.Module):
 
 		# Predictions
 		_zs = zs[:-1]
-		qs = self.model.Q(_zs, action, task, return_type='all')
+		if self.cfg.use_v_instead_q:
+			qs = self.model.V(_zs, task, return_type='all')
+		else:
+			qs = self.model.Q(_zs, action, task, return_type='all')
 		reward_preds = self.model.reward(_zs, action, task)
 
 		# Compute losses
@@ -293,14 +345,7 @@ class TDMPC2(torch.nn.Module):
 		self.optim.step()
 		self.optim.zero_grad(set_to_none=True)
 
-		# Update policy
-		pi_info = self.update_pi(zs.detach(), task)
-
-		# Update target Q-functions
-		self.model.soft_update_target_Q()
-
-		# Return training statistics
-		self.model.eval()
+		# Collect training statistics
 		info = TensorDict({
 			"consistency_loss": consistency_loss,
 			"reward_loss": reward_loss,
@@ -308,7 +353,16 @@ class TDMPC2(torch.nn.Module):
 			"total_loss": total_loss,
 			"grad_norm": grad_norm,
 		})
-		info.update(pi_info)
+  
+		# Update policy
+		if not pretrain:
+			pi_info = self.update_pi(zs.detach(), expert_action_dist, task)
+			info.update(pi_info)
+
+		# Update target Q-functions
+		self.model.soft_update_target_Q()
+		self.model.eval()
+
 		return info.detach().mean()
 
 	def update(self, buffer, pretrain=False):
@@ -322,8 +376,50 @@ class TDMPC2(torch.nn.Module):
 			dict: Dictionary of training statistics.
 		"""
 		obs, action, reward, task, info = buffer.sample()
-		kwargs = {}
+		expert_action_dist = info["expert_action_dist"]
+
+		# preprocess expert data (replace nan with Normal(0,1))
+		# If using the expert value, should also apply preprocessing here.
+		mean, std = expert_action_dist.chunk(2, dim=-1)
+		nan_idx = torch.isnan(mean) # samples which are not generated by mpc policy
+		mean[nan_idx] = torch.zeros_like(action[nan_idx])
+		std[nan_idx] = torch.ones_like(action[nan_idx])
+		expert_action_dist = torch.cat([mean, std],dim=-1)
+  
+		# lazy reanalyze
+		if not pretrain:
+			self.update_count += 1
+			if (self.cfg.reanalyze_interval > 0) and (self.update_count % self.cfg.reanalyze_interval == 0):
+				reanalyzed_action_dist = self.reanalyze(buffer, obs, task, info["index"])
+				# update reanalyzed sample
+				expert_action_dist[:,:self.cfg.reanalyze_batch_size] = reanalyzed_action_dist
+
+		kwargs = {"pretrain": pretrain}
 		if task is not None:
 			kwargs["task"] = task
 		torch.compiler.cudagraph_mark_step_begin()
-		return self._update(obs, action, reward, **kwargs)
+		return self._update(obs, action, reward, expert_action_dist, **kwargs)
+
+	@torch.no_grad()
+	def reanalyze(self, buffer, obs, task, index):
+		'''
+		Do lazy reanalyze
+		'''
+		self.model.eval()
+  
+		# re-plan
+		obs_ = obs[:-1,:self.cfg.reanalyze_batch_size].reshape(self.cfg.horizon*self.cfg.reanalyze_batch_size, *obs.shape[2:])
+		torch.compiler.cudagraph_mark_step_begin()
+		_, plan_info = self.plan(obs_, self.cfg.horizon*self.cfg.reanalyze_batch_size, \
+      		t0=True, task=task, horizon=self.cfg.reanalyze_horizon, update_prev_mean=False, reanalyze=True)
+
+		# Update reanalyzed data to buffer
+		index_list = index[1:, :self.cfg.reanalyze_batch_size].flatten().tolist()
+		with buffer._buffer._replay_lock: # Add lock to prevent any unexpected data change due to thread risk
+			buffer._buffer._storage._storage['expert_action_dist'][index_list] = \
+				plan_info["action_dist"].to(buffer._buffer._storage.device)
+			buffer._buffer._storage._storage['expert_value'][index_list] = \
+				plan_info["action_value"].flatten().to(buffer._buffer._storage.device)
+    
+		self.model.train()
+		return plan_info["action_dist"].view(self.cfg.horizon, self.cfg.reanalyze_batch_size, -1)

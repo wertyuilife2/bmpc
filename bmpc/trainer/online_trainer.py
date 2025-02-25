@@ -7,7 +7,7 @@ from trainer.base import Trainer
 
 
 class OnlineTrainer(Trainer):
-	"""Trainer class for single-task online TD-MPC2 training."""
+	"""Trainer class for single-task online training."""
 
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
@@ -24,7 +24,7 @@ class OnlineTrainer(Trainer):
 		)
 
 	def eval(self):
-		"""Evaluate a TD-MPC2 agent."""
+		"""Evaluate an agent."""
 		ep_rewards, ep_successes = [], []
 		for i in range(self.cfg.eval_episodes):
 			obs, done, ep_reward, t = self.env.reset(), False, 0, 0
@@ -32,7 +32,7 @@ class OnlineTrainer(Trainer):
 				self.logger.video.init(self.env, enabled=(i==0))
 			while not done:
 				torch.compiler.cudagraph_mark_step_begin()
-				action = self.agent.act(obs, t0=t==0, eval_mode=True)
+				action, _ = self.agent.act(obs, t0=t==0, eval_mode=True)
 				obs, reward, done, info = self.env.step(action)
 				ep_reward += reward
 				t += 1
@@ -47,25 +47,33 @@ class OnlineTrainer(Trainer):
 			episode_success=np.nanmean(ep_successes),
 		)
 
-	def to_td(self, obs, action=None, reward=None):
+	def to_td(self, obs, action=None, reward=None, plan_info=None):
 		"""Creates a TensorDict for a new episode."""
 		if isinstance(obs, dict):
 			obs = TensorDict(obs, batch_size=(), device='cpu')
 		else:
 			obs = obs.unsqueeze(0).cpu()
+		if plan_info is None:
+			plan_info = TensorDict({})
 		if action is None:
 			action = torch.full_like(self.env.rand_act(), float('nan'))
 		if reward is None:
 			reward = torch.tensor(float('nan'))
-		td = TensorDict(
+		expert_value = plan_info.get("action_value", torch.tensor(float('nan'))).squeeze().unsqueeze(0)
+		expert_action_dist = plan_info.get("action_dist", \
+	  		torch.full(size=(1, 2*self.cfg.action_dim), fill_value=float('nan')))
+		td = TensorDict(dict(
 			obs=obs,
 			action=action.unsqueeze(0),
 			reward=reward.unsqueeze(0),
-		batch_size=(1,))
+			expert_value=expert_value,
+			expert_action_dist=expert_action_dist,
+		), batch_size=(1,))
 		return td
 
+
 	def train(self):
-		"""Train a TD-MPC2 agent."""
+		"""Train an agent."""
 		train_metrics, done, eval_next = {}, True, False
 		while self._step <= self.cfg.steps:
 			# Evaluate agent periodically
@@ -78,6 +86,13 @@ class OnlineTrainer(Trainer):
 					eval_metrics = self.eval()
 					eval_metrics.update(self.common_metrics())
 					self.logger.log(eval_metrics, 'eval')
+					if self.agent.cfg.eval_pi: # evaluate policy prior
+						mpc = self.agent.cfg.mpc
+						self.agent.cfg.mpc = False
+						eval_metrics = self.eval()
+						eval_metrics.update(self.common_metrics())
+						self.logger.log(eval_metrics, "eval_pi")
+						self.agent.cfg.mpc = mpc			
 					eval_next = False
 
 				if self._step > 0:
@@ -94,21 +109,25 @@ class OnlineTrainer(Trainer):
 
 			# Collect experience
 			if self._step > self.cfg.seed_steps:
-				action = self.agent.act(obs, t0=len(self._tds)==1)
+				torch.compiler.cudagraph_mark_step_begin()
+				action, plan_info = self.agent.act(obs, t0=len(self._tds)==1)
 			else:
 				action = self.env.rand_act()
+				plan_info = None
 			obs, reward, done, info = self.env.step(action)
-			self._tds.append(self.to_td(obs, action, reward))
+			self._tds.append(self.to_td(obs, action, reward, plan_info))
 
 			# Update agent
 			if self._step >= self.cfg.seed_steps:
 				if self._step == self.cfg.seed_steps:
 					num_updates = self.cfg.seed_steps
+					pretrain = True
 					print('Pretraining agent on seed data...')
 				else:
 					num_updates = 1
+					pretrain = False
 				for _ in range(num_updates):
-					_train_metrics = self.agent.update(self.buffer)
+					_train_metrics = self.agent.update(self.buffer, pretrain)
 				train_metrics.update(_train_metrics)
 
 			self._step += 1

@@ -26,12 +26,17 @@ class WorldModel(nn.Module):
 		self._dynamics = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], cfg.latent_dim, act=layers.SimNorm(cfg))
 		self._reward = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
 		self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
-		self._Qs = layers.Ensemble([layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
+		if self.cfg.use_v_instead_q:
+			self._Qs = layers.Ensemble([layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
+		else:
+			self._Qs = layers.Ensemble([layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
 		self.apply(init.weight_init)
 		init.zero_([self._reward[-1].weight, self._Qs.params["2", "weight"]])
 
 		self.register_buffer("log_std_min", torch.tensor(cfg.log_std_min))
 		self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
+		self.register_buffer("expl_log_std_min", torch.tensor(cfg.expl_log_std_min))
+		self.register_buffer("expl_log_std_dif", torch.tensor(cfg.expl_log_std_max) - self.expl_log_std_min)
 		self.init()
 
 	def init(self):
@@ -126,18 +131,23 @@ class WorldModel(nn.Module):
 		z = torch.cat([z, a], dim=-1)
 		return self._reward(z)
 
-	def pi(self, z, task):
+	def pi(self, z, task, expl=False):
 		"""
 		Samples an action from the policy prior.
 		The policy prior is a Gaussian distribution with
 		mean and (log) std predicted by a neural network.
+
+		expl: whether to use expl_log_std_min and expl_log_std_dif to calculate log_std.
 		"""
 		if self.cfg.multitask:
 			z = self.task_emb(z, task)
 
 		# Gaussian policy prior
 		mean, log_std = self._pi(z).chunk(2, dim=-1)
-		log_std = math.log_std(log_std, self.log_std_min, self.log_std_dif)
+		if expl:
+			log_std = math.log_std(log_std, self.expl_log_std_min, self.expl_log_std_dif)
+		else:
+			log_std = math.log_std(log_std, self.log_std_min, self.log_std_dif)
 		eps = torch.randn_like(mean)
 
 		if self.cfg.multitask: # Mask out unused action dimensions
@@ -155,8 +165,12 @@ class WorldModel(nn.Module):
 		scaled_log_prob = log_prob * size
 
 		# Reparameterization trick
-		action = mean + eps * log_std.exp()
-		mean, action, log_prob = math.squash(mean, action, log_prob)
+		if self.cfg.bmpc:
+			mean = torch.tanh(mean)
+			action = (mean + eps * log_std.exp()).clamp(-1,1)
+		else:
+			action = mean + eps * log_std.exp()
+			mean, action, log_prob = math.squash(mean, action, log_prob)
 
 		entropy_scale = scaled_log_prob / (log_prob + 1e-8)
 		info = TensorDict({
@@ -178,6 +192,7 @@ class WorldModel(nn.Module):
 		`target` specifies whether to use the target Q-networks or not.
 		"""
 		assert return_type in {'min', 'avg', 'all'}
+		assert not self.cfg.use_v_instead_q
 
 		if self.cfg.multitask:
 			z = self.task_emb(z, task)
@@ -199,3 +214,35 @@ class WorldModel(nn.Module):
 		if return_type == "min":
 			return Q.min(0).values
 		return Q.sum(0) / 2
+
+	def V(self, z, task, return_type='avg', target=False, detach=False):
+		"""
+		Predict state value.
+		`return_type` can be one of [`min`, `avg`, `all`]:
+			- `min`: return the minimum of two randomly subsampled V-values.
+			- `avg`: return the average of two randomly subsampled V-values.
+			- `all`: return all V-values.
+		`target` specifies whether to use the target V-networks or not.
+		"""
+		assert return_type in {'min', 'avg', 'all'}
+		assert self.cfg.use_v_instead_q
+
+		if self.cfg.multitask:
+			z = self.task_emb(z, task)
+
+		if target:
+			vnet = self._target_Qs
+		elif detach:
+			vnet = self._detach_Qs
+		else:
+			vnet = self._Qs
+		out = vnet(z)
+
+		if return_type == 'all':
+			return out
+
+		qidx = torch.randperm(self.cfg.num_q, device=out.device)[:2]
+		V = math.two_hot_inv(out[qidx], self.cfg)
+		if return_type == "min":
+			return V.min(0).values
+		return V.sum(0) / 2

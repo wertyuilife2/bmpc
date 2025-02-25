@@ -1,4 +1,4 @@
-name: tdmpc2
+name: bmpc
 channels:
   - pytorch-nightly
   - nvidia
@@ -34,6 +34,7 @@ dependencies:
     - tqdm==4.66.4
     - pandas==2.0.3
     - wandb==0.17.4
+    - tensorboard==2.18.0
     ####################
     # Gym:
     # (unmaintained but required for maniskill2/meta-world)
