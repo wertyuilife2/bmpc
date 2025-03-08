@@ -49,7 +49,7 @@ $ python train.py task=dog-run steps=1000000 bmpc=false num_q=5 log_std_min=-10 
 See `config.yaml` for a full list of arguments.
 
 ## Supported tasks
-This codebase currently supports continuous control tasks from **DMControl**, **Meta-World**, **ManiSkill2**, and **MyoSuite**, which covers all tasks used in the paper. See below table for expected name formatting:
+This codebase currently supports continuous control tasks from **DMControl**, **Meta-World**, **ManiSkill2**, **MyoSuite** and **HumanoidBench**, which covers all tasks used in the paper. See below table for expected name formatting:
 
 | domain | task
 | --- | --- |
@@ -61,6 +61,8 @@ This codebase currently supports continuous control tasks from **DMControl**, **
 | maniskill | pick-ycb
 | myosuite  | myo-key-turn
 | myosuite  | myo-key-turn-hard
+| humanoidbench | humanoid_h1-slide-v0
+| humanoidbench | humanoid_h1hand-walk-v0
 
 which can be run by specifying the `task` argument for `train.py`.
 
