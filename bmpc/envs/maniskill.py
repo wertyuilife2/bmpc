@@ -1,4 +1,5 @@
-import gymnasium as gym
+# import gymnasium as gym
+import gym
 import numpy as np
 from envs.wrappers.timeout import Timeout
 
@@ -75,5 +76,5 @@ def make_env(cfg):
 	)
 	env = ManiSkillWrapper(env, cfg)
 	env = Timeout(env, max_episode_steps=100)
-	env.max_episode_steps = env._max_episode_steps
+	# env.max_episode_steps = env._max_episode_steps
 	return env
