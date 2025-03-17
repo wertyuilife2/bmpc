@@ -37,13 +37,13 @@ Depending on your existing system packages, you may need to install other depend
 See below examples on how to train a BMPC agent in the default setting. 
 
 ```
-$ python train.py task=dog-run steps=1000000
+$ python train.py compile=true task=dog-run steps=1000000
 ```
 
 If you prefer, you can also train a TD-MPC2 agent using the following command:
 
 ```
-$ python train.py task=dog-run steps=1000000 bmpc=false num_q=5 log_std_min=-10 log_std_max=2 
+$ python train.py compile=true task=dog-run steps=1000000 bmpc=false num_q=5 log_std_min=-10 log_std_max=2 
 ```
 
 See `config.yaml` for a full list of arguments.
