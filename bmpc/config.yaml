@@ -22,8 +22,8 @@ td_horizon: 1
 reanalyze_interval: 10 # 0 means never reanalyze
 reanalyze_batch_size: 20 # samples that will be reanalyzed in a batch (should <= batch_size)
 reanalyze_horizon: 3
-## explore when reanalyze
-expl_log_std_min: -2
+## explore when reanalyze (do it when need better exploration)
+expl_log_std_min: -3
 expl_log_std_max: 1
 
 # training
