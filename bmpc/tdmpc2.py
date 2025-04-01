@@ -227,6 +227,7 @@ class TDMPC2(torch.nn.Module):
 			"pi_entropy": info["entropy"],
 			"pi_scaled_entropy": info["scaled_entropy"],
 			"pi_scale": self.scale.value,
+			"pi_log_std": info["log_std"],
 		})
 		return info
 
