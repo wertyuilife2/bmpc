@@ -20,14 +20,16 @@ class TDMPC2(torch.nn.Module):
 		self.cfg = cfg
 		self.device = torch.device('cuda:0')
 		self.model = WorldModel(cfg).to(self.device)
-		self.optim = torch.optim.Adam([
+		params_list = [
 			{'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
 			{'params': self.model._dynamics.parameters()},
 			{'params': self.model._reward.parameters()},
 			{'params': self.model._Qs.parameters()},
-			{'params': self.model._task_emb.parameters() if self.cfg.multitask else []
-			 }
-		], lr=self.cfg.lr, capturable=True)
+			{'params': self.model._task_emb.parameters() if self.cfg.multitask else []}
+		]
+		if cfg.episodic:
+			params_list.append({'params': self.model._terminated.parameters()})
+		self.optim = torch.optim.Adam(params_list, lr=self.cfg.lr, capturable=True)
 		self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr, eps=1e-5, capturable=True)
 		self.model.eval()
 		self.scale = RunningScale(cfg)

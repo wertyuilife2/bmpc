@@ -20,14 +20,16 @@ class BMPC(torch.nn.Module):
 		self.cfg = cfg
 		self.device = torch.device('cuda:0')
 		self.model = WorldModel(cfg).to(self.device)
-		self.optim = torch.optim.Adam([
+		params_list = [
 			{'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
 			{'params': self.model._dynamics.parameters()},
 			{'params': self.model._reward.parameters()},
 			{'params': self.model._Qs.parameters()},
-			{'params': self.model._task_emb.parameters() if self.cfg.multitask else []
-			 }
-		], lr=self.cfg.lr, capturable=True)
+			{'params': self.model._task_emb.parameters() if self.cfg.multitask else []}
+		]
+		if cfg.episodic:
+			params_list.append({'params': self.model._terminated.parameters()})
+		self.optim = torch.optim.Adam(params_list, lr=self.cfg.lr, capturable=True)
 		self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr, eps=1e-5, capturable=True)
 		self.model.eval()
 		self.scale = RunningScale(cfg)
@@ -120,20 +122,43 @@ class BMPC(torch.nn.Module):
 		return action[0].cpu(), None
 
 	@torch.no_grad()
-	def _estimate_value(self, z, actions, task, horizon):
+	def _estimate_value(self, batch_size, z, actions, task, horizon):
 		"""Estimate value of a trajectory starting at latent state z and executing given actions."""
 		G, discount = 0, 1
+		terminated = torch.zeros(batch_size, self.cfg.num_samples, 1, dtype=torch.float32, device=z.device)
 		for t in range(horizon):
 			reward = math.two_hot_inv(self.model.reward(z, actions[:, t], task), self.cfg)
 			z = self.model.next(z, actions[:, t], task)
-			G = G + discount * reward
+			G = G + discount * (1-terminated) * reward
 			discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
 			discount = discount * discount_update
+			if self.cfg.episodic:
+				terminated = torch.clip_(terminated + (self.model.terminated(z, task) > 0.5).float(), max=1.)
 		if self.cfg.use_v_instead_q:
-			return G + discount * self.model.V(z, task, return_type="avg")
+			return G + discount * (1-terminated) * self.model.V(z, task, return_type="avg")
 		else:
 			action, _ = self.model.pi(z, task)
-			return G + discount * self.model.Q(z, action, task, return_type='avg')
+			return G + discount * (1-terminated) * self.model.Q(z, action, task, return_type='avg')
+
+	# soft episodic planning
+	# @torch.no_grad()
+	# def _estimate_value(self, batch_size, z, actions, task, horizon):
+	# 	"""Estimate value of a trajectory starting at latent state z and executing given actions."""
+	# 	G, discount = 0, 1
+	# 	terminated = torch.zeros(batch_size, self.cfg.num_samples, 1, dtype=torch.float32, device=z.device)
+	# 	for t in range(horizon):
+	# 		reward = math.two_hot_inv(self.model.reward(z, actions[:, t], task), self.cfg)
+	# 		z = self.model.next(z, actions[:, t], task)
+	# 		G = G + discount * reward
+	# 		if self.cfg.episodic:
+	# 			terminated = torch.clip_(terminated + (self.model.terminated(z, task) > 0.5).float(), max=1.)
+	# 		discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
+	# 		discount = discount * discount_update * (1-terminated)
+	# 	if self.cfg.use_v_instead_q:
+	# 		return G + discount * self.model.V(z, task, return_type="avg")
+	# 	else:
+	# 		action, _ = self.model.pi(z, task)
+	# 		return G + discount * self.model.Q(z, action, task, return_type='avg')
 
 	@torch.no_grad()
 	def _plan(self, obs, batch_size, t0=False, eval_mode=False, task=None, horizon=None, update_prev_mean=True, reanalyze=False):
@@ -188,7 +213,7 @@ class BMPC(torch.nn.Module):
 				actions = actions * self.model._action_masks[task]
 
 			# Compute elite actions
-			value = self._estimate_value(z, actions, task, horizon).nan_to_num(0)
+			value = self._estimate_value(batch_size, z, actions, task, horizon).nan_to_num(0)
 			elite_idxs = torch.topk(value.squeeze(2), self.cfg.num_elites, dim=1).indices
 			elite_value = torch.gather(value, 1, elite_idxs.unsqueeze(2))
 			elite_actions = torch.gather(actions, 2, elite_idxs.unsqueeze(1).unsqueeze(3).expand(-1, horizon, -1, self.cfg.action_dim))
@@ -253,13 +278,14 @@ class BMPC(torch.nn.Module):
 		return info
 
 	@torch.no_grad()
-	def _td_target_Q(self, next_z, reward, task):
+	def _td_target_Q(self, next_z, reward, terminated, task):
 		"""
 		Compute the TD-target from a reward and the observation at the following time step.
 
 		Args:
 			next_z (torch.Tensor): Latent state at the following time step.
 			reward (torch.Tensor): Reward at the current time step.
+			terminated (torch.Tensor): Termination signal at the current time step.
 			task (torch.Tensor): Task index (only used for multi-task experiments).
 
 		Returns:
@@ -267,8 +293,8 @@ class BMPC(torch.nn.Module):
 		"""
 		action, _ = self.model.pi(next_z, task)
 		discount = self.discount[task].unsqueeze(-1) if self.cfg.multitask else self.discount
-		return reward + discount * self.model.Q(next_z, action, task, return_type='avg', target=True)
-
+		return reward + discount * (1-terminated) * self.model.Q(next_z, action, task, return_type='avg', target=True)
+	
 	@torch.no_grad()
 	def _td_target_V(self, zs, task):
 		"""
@@ -284,17 +310,22 @@ class BMPC(torch.nn.Module):
 
 		Gs, discount = 0, 1
 		zs_ = zs.clone()
+		# terminated = torch.zeros(batch_size, self.cfg.num_samples, 1, dtype=torch.float32, device=z.device)
 		for _ in range(self.cfg.td_horizon):
 			actions, _ = self.model.pi(zs_, task)
 			rewards = math.two_hot_inv(self.model.reward(zs_, actions, task), self.cfg)
 			zs_ = self.model.next(zs_, actions, task)
 			Gs += discount * rewards
+			# Gs += discount * (1-terminated) * rewards
 			discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
 			discount = discount * discount_update
+			# if self.cfg.episodic:
+   			# 	terminated = torch.clip_(terminated + (self.model.terminated(z, task) > 0.5).float(), max=1.)
 		td_target = Gs + discount * self.model.V(zs_, task, return_type="avg", target=True)
+		# td_target = Gs + discount * (1-terminated) * self.model.V(zs_, task, return_type="avg", target=True)
 		return td_target
 	
-	def _update(self, obs, action, reward, expert_action_dist, reanalyze_age, task=None, pretrain=False):
+	def _update(self, obs, action, reward, terminated, expert_action_dist, reanalyze_age, task=None, pretrain=False):
 		# Compute targets
 		with torch.no_grad():
 			true_zs = self.model.encode(obs, task) # latent from real obs
@@ -302,7 +333,7 @@ class BMPC(torch.nn.Module):
 			if self.cfg.use_v_instead_q:
 				td_targets = self._td_target_V(true_zs[:-1], task)
 			else:
-				td_targets = self._td_target_Q(next_z, reward, task)
+				td_targets = self._td_target_Q(next_z, reward, terminated, task)
 	
 		# Prepare for update
 		self.model.train()
@@ -324,13 +355,17 @@ class BMPC(torch.nn.Module):
 		else:
 			qs = self.model.Q(_zs, action, task, return_type='all')
 		reward_preds = self.model.reward(_zs, action, task)
+		if self.cfg.episodic:
+			terminated_preds = self.model.terminated(zs[-1], task)
 
 		# Compute losses
-		reward_loss, value_loss = 0, 0
+		reward_loss, terminated_loss, value_loss = 0, 0, 0
 		for t, (rew_pred_unbind, rew_unbind, td_targets_unbind, qs_unbind) in enumerate(zip(reward_preds.unbind(0), reward.unbind(0), td_targets.unbind(0), qs.unbind(1))):
 			reward_loss = reward_loss + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
 			for _, qs_unbind_unbind in enumerate(qs_unbind.unbind(0)):
 				value_loss = value_loss + math.soft_ce(qs_unbind_unbind, td_targets_unbind, self.cfg).mean() * self.cfg.rho**t
+		if self.cfg.episodic:
+			terminated_loss = terminated_loss + F.binary_cross_entropy(terminated_preds, terminated[-1,:,:])
 
 		consistency_loss = consistency_loss / self.cfg.horizon
 		reward_loss = reward_loss / self.cfg.horizon
@@ -338,6 +373,7 @@ class BMPC(torch.nn.Module):
 		total_loss = (
 			self.cfg.consistency_coef * consistency_loss +
 			self.cfg.reward_coef * reward_loss +
+			self.cfg.terminated_coef * terminated_loss +
 			self.cfg.value_coef * value_loss
 		)
 
@@ -355,6 +391,8 @@ class BMPC(torch.nn.Module):
 			"total_loss": total_loss,
 			"grad_norm": grad_norm,
 		})
+		if self.cfg.episodic:
+			info["terminated_loss"] = terminated_loss
   
 		# Update policy
 		if not pretrain:
@@ -377,7 +415,7 @@ class BMPC(torch.nn.Module):
 		Returns:
 			dict: Dictionary of training statistics.
 		"""
-		obs, action, reward, task, info = buffer.sample()
+		obs, action, reward, terminated, task, info = buffer.sample()
 		expert_action_dist = info["expert_action_dist"]
 		reanalyze_age = self.reanalyze_count - info["last_reanalyze"]
 
@@ -402,7 +440,7 @@ class BMPC(torch.nn.Module):
 		if task is not None:
 			kwargs["task"] = task
 		torch.compiler.cudagraph_mark_step_begin()
-		return self._update(obs, action, reward, expert_action_dist, reanalyze_age, **kwargs)
+		return self._update(obs, action, reward, terminated, expert_action_dist, reanalyze_age, **kwargs)
 
 	@torch.no_grad()
 	def reanalyze(self, buffer, obs, task, index):

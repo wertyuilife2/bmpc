@@ -95,11 +95,12 @@ class Buffer():
 		Prepare a sampled batch for training (post-processing).
 		Expects `td` to be a TensorDict with batch size TxB.
 		"""
-		td = td.select("obs", "action", "reward", "task", "expert_value", "expert_action_dist", \
+		td = td.select("obs", "action", "reward", "terminated", "task", "expert_value", "expert_action_dist", \
       			"episode", "last_reanalyze", strict=False).to(self._device, non_blocking=True)
 		obs = td.get('obs').contiguous()
 		action = td.get('action')[1:].contiguous()
 		reward = td.get('reward')[1:].unsqueeze(-1).contiguous()
+		terminated = td['terminated'][1:].unsqueeze(-1).contiguous()
 		task = td.get('task', None)
 		expert_value = td.get('expert_value')[1:].unsqueeze(-1).contiguous()
 		expert_action_dist = td.get('expert_action_dist')[1:].contiguous()
@@ -114,7 +115,7 @@ class Buffer():
 			"episode": episode,
 			"last_reanalyze": last_reanalyze
 		})
-		return obs, action, reward, task, info
+		return obs, action, reward, terminated, task, info
 
 	def sample(self):
 		"""Sample a batch of subsequences from the buffer."""

@@ -27,6 +27,8 @@ class HumanoidWrapper(gym.Wrapper):
     def step(self, action):
         obs, reward, done, truncated, info = self.env.step(action.copy())
         obs = obs.astype(np.float32)
+        if self.cfg.episodic:
+            info['terminated'] = done
         return obs, reward, done or truncated, info
 
     @property

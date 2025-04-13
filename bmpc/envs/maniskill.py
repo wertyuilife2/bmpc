@@ -48,9 +48,13 @@ class ManiSkillWrapper(gym.Wrapper):
 	def step(self, action):
 		reward = 0
 		for _ in range(2):
-			obs, r, _, info = self.env.step(action)
+			obs, r, done, info = self.env.step(action)
 			reward += r
-		return obs, reward, False, info
+			if self.cfg.episodic:
+				info['terminated'] = done
+				if done:
+					break
+		return obs, reward, done if self.cfg.episodic else False, info
 
 	@property
 	def unwrapped(self):
