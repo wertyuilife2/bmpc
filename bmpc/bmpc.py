@@ -6,6 +6,7 @@ from common.scale import RunningScale
 from common.world_model import WorldModel
 from common.layers import api_model_conversion
 from tensordict import TensorDict
+from torchrl.modules.distributions import TanhNormal
 
 
 class BMPC(torch.nn.Module):
@@ -254,14 +255,24 @@ class BMPC(torch.nn.Module):
 			float: Loss of the policy update.
 		"""
 		_, info = self.model.pi(zs[:-1], task)
-		actions_dist = torch.cat([info["mean"], info["log_std"].exp()], dim=-1)
-		kl_loss = math.kl_div(actions_dist, expert_action_dist).mean(-1, keepdim=True)
-		self.scale.update(kl_loss[0])
-		kl_loss = self.scale(kl_loss)
-		imitation_scale = self.cfg.imitation_discount ** reanalyze_age
-		# Loss is a weighted sum of kl divergence
-		rho = torch.pow(self.cfg.rho, torch.arange(len(kl_loss), device=self.device))
-		pi_loss = ((imitation_scale*(kl_loss - self.cfg.entropy_coef * info["scaled_entropy"])).mean(dim=(1,2)) * rho).mean()
+		if self.cfg.policy_loss_type == "kl":
+			actions_dist = torch.cat([info["mean"], info["log_std"].exp()], dim=-1)
+			kl_loss = math.kl_div(actions_dist, expert_action_dist).mean(-1, keepdim=True)
+			self.scale.update(kl_loss[0])
+			kl_loss = self.scale(kl_loss)
+			imitation_scale = self.cfg.imitation_discount ** reanalyze_age
+			rho = torch.pow(self.cfg.rho, torch.arange(len(kl_loss), device=self.device))
+			pi_loss = ((imitation_scale*(kl_loss - self.cfg.entropy_coef * info["scaled_entropy"])).mean(dim=(1,2)) * rho).mean()
+		elif self.cfg.policy_loss_type == "log_prob": # not using imitation discount for now
+			exp_means, _ = expert_action_dist.chunk(2, dim=-1)
+			act_dist = TanhNormal(loc=info["raw_mean"], scale=info["log_std"].exp())
+			logp_loss = -act_dist.log_prob(exp_means).unsqueeze(-1)
+			self.scale.update(logp_loss[0])
+			logp_loss = self.scale(logp_loss)   
+			rho = torch.pow(self.cfg.rho, torch.arange(len(logp_loss), device=self.device))
+			pi_loss = ((logp_loss - self.cfg.entropy_coef * info["entropy"]).mean(dim=(1,2)) * rho).mean()
+		else:
+			raise NotImplementedError()
 		pi_loss.backward()
 		pi_grad_norm = torch.nn.utils.clip_grad_norm_(self.model._pi.parameters(), self.cfg.grad_clip_norm)
 		self.pi_optim.step()

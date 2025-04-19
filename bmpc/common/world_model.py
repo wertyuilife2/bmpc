@@ -6,7 +6,7 @@ import torch.nn as nn
 from common import layers, math, init
 from tensordict import TensorDict
 from tensordict.nn import TensorDictParams
-
+from torchrl.modules.distributions import TanhNormal
 
 class WorldModel(nn.Module):
 	"""
@@ -158,16 +158,19 @@ class WorldModel(nn.Module):
 			z = self.task_emb(z, task)
 
 		# Gaussian policy prior
-		mean, log_std = self._pi(z).chunk(2, dim=-1)
+		raw_mean, log_std = self._pi(z).chunk(2, dim=-1)
+		raw_std = log_std # for policy_type == "5tanh_normal"
+
 		if expl:
 			log_std = math.log_std(log_std, self.expl_log_std_min, self.expl_log_std_dif)
 		else:
 			log_std = math.log_std(log_std, self.log_std_min, self.log_std_dif)
-		eps = torch.randn_like(mean)
+		eps = torch.randn_like(raw_mean)
 
 		if self.cfg.multitask: # Mask out unused action dimensions
-			mean = mean * self._action_masks[task]
+			raw_mean = raw_mean * self._action_masks[task]
 			log_std = log_std * self._action_masks[task]
+			raw_std = raw_std * self._action_masks[task] + 1 # for policy_type == "5tanh_normal"
 			eps = eps * self._action_masks[task]
 			action_dims = self._action_masks.sum(-1)[task].unsqueeze(-1)
 		else: # No masking
@@ -181,12 +184,33 @@ class WorldModel(nn.Module):
 
 		# Reparameterization trick
 		if self.cfg.bmpc:
-			mean = torch.tanh(mean)
-			action = (mean + eps * log_std.exp()).clamp(-1,1)
+			if self.cfg.policy_loss_type == "kl":
+				mean = torch.tanh(raw_mean)
+				action = (mean + eps * log_std.exp()).clamp(-1,1)
+			elif self.cfg.policy_loss_type == "log_prob":
+				if self.cfg.policy_type == "tanh_normal":
+					act_dist = TanhNormal(loc=raw_mean, scale=log_std.exp())
+					action = act_dist.sample()
+					log_prob = act_dist.log_prob(action).unsqueeze(-1)
+					scaled_log_prob = log_prob * size
+					mean = torch.tanh(raw_mean) # not a right mean here，TanhNormal does not have a closed form formula for the mean.
+				elif self.cfg.policy_type == "5tanh_normal": # not doing multi-task mask here
+					raw_mean = 5 * torch.tanh(raw_mean / 5)
+					std = torch.nn.functional.softplus(raw_std + 1.0) + 0.1 # init_std:1.0, min_std:0.1
+					act_dist = TanhNormal(loc=raw_mean, scale=std)
+					log_std = std.log()
+					action = act_dist.sample()
+					log_prob = act_dist.log_prob(action).unsqueeze(-1)
+					scaled_log_prob = log_prob * size
+					mean = torch.tanh(raw_mean) # not a right mean here，TanhNormal does not have a closed form formula for the mean.
+				else:
+					raise NotImplementedError()
+			else:
+				raise NotImplementedError()
 		else:
-			action = mean + eps * log_std.exp()
-			mean, action, log_prob = math.squash(mean, action, log_prob)
-
+			action = raw_mean + eps * log_std.exp()
+			mean, action, log_prob = math.squash(raw_mean, action, log_prob)
+   
 		entropy_scale = scaled_log_prob / (log_prob + 1e-8)
 		info = TensorDict({
 			"mean": mean,
@@ -194,6 +218,7 @@ class WorldModel(nn.Module):
 			"action_prob": 1.,
 			"entropy": -log_prob,
 			"scaled_entropy": -log_prob * entropy_scale,
+			"raw_mean": raw_mean,
 		})
 		return action, info
 

@@ -19,6 +19,9 @@ eval_pi: false
 ## value learning
 use_v_instead_q: true # using V with model-based TD-learning / using Q with model-free TD-learning 
 td_horizon: 1
+## policy learning
+policy_loss_type: kl # 'kl' / 'log_prob'
+policy_type: tanh_normal # 'tanh_normal' / '5tanh_normal', only works when policy_loss_type==log_prob
 ## lazy reanalyze
 reanalyze_interval: 10 # 0 means never reanalyze
 reanalyze_batch_size: 20 # samples that will be reanalyzed in a batch (should <= batch_size)
