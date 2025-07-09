@@ -20,7 +20,7 @@ eval_pi: false
 use_v_instead_q: true # using V with model-based TD-learning / using Q with model-free TD-learning 
 td_horizon: 1
 ## policy learning
-policy_loss_type: kl # 'kl' / 'log_prob'
+policy_loss_type: kl # 'kl' / 'log_prob' / 'mse'
 policy_type: tanh_normal # 'tanh_normal' / '5tanh_normal', only works when policy_loss_type==log_prob
 ## lazy reanalyze
 reanalyze_interval: 10 # 0 means never reanalyze

@@ -254,7 +254,7 @@ class BMPC(torch.nn.Module):
 		Returns:
 			float: Loss of the policy update.
 		"""
-		_, info = self.model.pi(zs[:-1], task)
+		action, info = self.model.pi(zs[:-1], task)
 		if self.cfg.policy_loss_type == "kl":
 			actions_dist = torch.cat([info["mean"], info["log_std"].exp()], dim=-1)
 			kl_loss = math.kl_div(actions_dist, expert_action_dist).mean(-1, keepdim=True)
@@ -271,6 +271,11 @@ class BMPC(torch.nn.Module):
 			logp_loss = self.scale(logp_loss)   
 			rho = torch.pow(self.cfg.rho, torch.arange(len(logp_loss), device=self.device))
 			pi_loss = ((logp_loss - self.cfg.entropy_coef * info["entropy"]).mean(dim=(1,2)) * rho).mean()
+		elif self.cfg.policy_loss_type == "mse": # not using imitation discount for now
+			exp_means, _ = expert_action_dist.chunk(2, dim=-1)
+			mse_loss = F.mse_loss(action, exp_means, reduction="none").mean(-1, keepdim=True)
+			rho = torch.pow(self.cfg.rho, torch.arange(len(mse_loss), device=self.device))
+			pi_loss = ((mse_loss - self.cfg.entropy_coef * info["scaled_entropy"]).mean(dim=(1,2)) * rho).mean()
 		else:
 			raise NotImplementedError()
 		pi_loss.backward()
@@ -304,7 +309,7 @@ class BMPC(torch.nn.Module):
 		"""
 		action, _ = self.model.pi(next_z, task)
 		discount = self.discount[task].unsqueeze(-1) if self.cfg.multitask else self.discount
-		return reward + discount * (1-terminated) * self.model.Q(next_z, action, task, return_type='avg', target=True)
+		return reward + discount * (1-terminated) * self.model.Q(next_z, action, task, return_type='min', target=True)
 	
 	@torch.no_grad()
 	def _td_target_V(self, zs, task):
@@ -336,6 +341,13 @@ class BMPC(torch.nn.Module):
 		# td_target = Gs + discount * (1-terminated) * self.model.V(zs_, task, return_type="avg", target=True)
 		return td_target
 	
+	# compute td-target-V not using model(will result major off-policy issue)
+	@torch.no_grad()
+	def _td_target_V_2(self, next_z, reward, task):
+		discount = self.discount[task].unsqueeze(-1) if self.cfg.multitask else self.discount
+		return reward + discount * self.model.V(next_z, task, return_type='min', target=True)
+ 
+
 	def _update(self, obs, action, reward, terminated, expert_action_dist, reanalyze_age, task=None, pretrain=False):
 		# Compute targets
 		with torch.no_grad():
@@ -343,6 +355,7 @@ class BMPC(torch.nn.Module):
 			next_z = true_zs[1:]
 			if self.cfg.use_v_instead_q:
 				td_targets = self._td_target_V(true_zs[:-1], task)
+				# td_targets = self._td_target_V_2(next_z, reward, task)
 			else:
 				td_targets = self._td_target_Q(next_z, reward, terminated, task)
 	

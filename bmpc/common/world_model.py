@@ -205,6 +205,14 @@ class WorldModel(nn.Module):
 					mean = torch.tanh(raw_mean) # not a right mean here，TanhNormal does not have a closed form formula for the mean.
 				else:
 					raise NotImplementedError()
+			elif self.cfg.policy_loss_type == "mse": # use tdmpc2 impl?
+				# act_dist = TanhNormal(loc=raw_mean, scale=log_std.exp())
+				# action = act_dist.sample()
+				# log_prob = act_dist.log_prob(action).unsqueeze(-1)
+				# scaled_log_prob = log_prob * size
+				# mean = torch.tanh(raw_mean) # not a right mean here，TanhNormal does not have a closed form formula for the mean.
+				action = raw_mean + eps * log_std.exp()
+				mean, action, log_prob = math.squash(raw_mean, action, log_prob)
 			else:
 				raise NotImplementedError()
 		else:

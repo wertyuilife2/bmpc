@@ -46,11 +46,19 @@ def make_env(cfg):
     if not cfg.task.startswith("humanoid_"):
         raise ValueError("Unknown task:", cfg.task)
     import humanoid_bench
-    policy_path = cfg.get("policy_path", None)
-    mean_path = cfg.get("mean_path", None)
-    var_path = cfg.get("var_path", None)
-    policy_type = cfg.get("policy_type", None)
-    small_obs = cfg.get("small_obs", None)
+    
+    # Conflicts with 'policy_type' in config.yaml – commented out
+    # policy_path = cfg.get("policy_path", None)
+    # mean_path = cfg.get("mean_path", None)
+    # var_path = cfg.get("var_path", None)
+    # policy_type = cfg.get("policy_type", None)
+    # small_obs = cfg.get("small_obs", None)
+    policy_path = None
+    mean_path = None
+    var_path = None
+    policy_type = None
+    small_obs = None
+    
     if small_obs is not None:
         small_obs = str(small_obs)
 
