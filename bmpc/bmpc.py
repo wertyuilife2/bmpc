@@ -7,7 +7,8 @@ from common.world_model import WorldModel
 from common.layers import api_model_conversion
 from tensordict import TensorDict
 from torchrl.modules.distributions import TanhNormal
-
+from muon import SingleDeviceMuonWithAuxAdam
+from itertools import chain
 
 class BMPC(torch.nn.Module):
 	"""
@@ -21,17 +22,105 @@ class BMPC(torch.nn.Module):
 		self.cfg = cfg
 		self.device = torch.device('cuda:0')
 		self.model = WorldModel(cfg).to(self.device)
-		params_list = [
-			{'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
-			{'params': self.model._dynamics.parameters()},
-			{'params': self.model._reward.parameters()},
-			{'params': self.model._Qs.parameters()},
-			{'params': self.model._task_emb.parameters() if self.cfg.multitask else []}
-		]
-		if cfg.episodic:
-			params_list.append({'params': self.model._terminated.parameters()})
-		self.optim = torch.optim.Adam(params_list, lr=self.cfg.lr, capturable=True)
-		self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr, eps=1e-5, capturable=True)
+		if self.cfg.use_muon:
+			####################### use muon optimizer #########################
+			# 注意：LayerNorm、bias不能加weight decay!
+			# 注意：目前的muon还不支持torch.compile
+
+			# muon1
+			# hidden_weights = [p for p in self.model._dynamics.parameters() if p.ndim >= 2]
+			# hidden_gains_biases = [p for p in self.model._dynamics.parameters() if p.ndim < 2]
+			# nonhidden_params = list(self.model._reward.parameters()) + \
+			# 	list(self.model._Qs.parameters()) + \
+			#     (list(self.model._task_emb.parameters()) if self.cfg.multitask else [])
+			# encoder_params = self.model._encoder.parameters()
+			# ....
+
+			# muon2
+			# hidden_weights = [p for p in chain(self.model._dynamics.parameters(), \
+			# 				self.model._reward[:-1].parameters()) if p.ndim >= 2]
+			# hidden_weights += [self.model._Qs.params["0","weight"], self.model._Qs.params["1","weight"]]
+			# hidden_gains_biases = [p for p in chain(self.model._dynamics.parameters(), \
+			# 						self.model._reward[:-1].parameters()) if p.ndim < 2]
+			# # The ln.weight of the ensemble Q is a concatenation of number Q tensors, so its ndim=2.
+			# # Therefore, we can't filter it out using ndim<2 and need to handle it separately in Adam.
+			# # (Besides, it's also difficult to iterate over the parameters of the ensemble directly.)
+			# hidden_gains_biases += [self.model._Qs.params["0","bias"], self.model._Qs.params["1","bias"], \
+			# 	*list(self.model._Qs.params["0","ln"].values()), *list(self.model._Qs.params["1","ln"].values())]
+			# nonhidden_params = [*self.model._reward[-1].parameters(), \
+			# 			self.model._Qs.params["2","weight"], self.model._Qs.params["2","bias"]]
+			# encoder_params = self.model._encoder.parameters()
+			# param_groups = [
+			# 	dict(params=hidden_weights, use_muon=True,
+			# 		lr=0.02, weight_decay=0.0),
+			# 	dict(params=hidden_gains_biases+nonhidden_params, use_muon=False,
+			# 		lr=self.cfg.lr, betas=(0.9, 0.999), weight_decay=0.0),
+			# 	dict(params=encoder_params, use_muon=False,
+			# 		lr=self.cfg.lr*self.cfg.enc_lr_scale, betas=(0.9, 0.999), weight_decay=0.0),
+			# 	]
+			# self.optim = SingleDeviceMuonWithAuxAdam(param_groups)
+
+			# pi_hidden_weights = [p for p in self.model._pi[:-1].parameters() if p.ndim >= 2]
+			# pi_hidden_gains_biases = [p for p in self.model._pi[:-1].parameters() if p.ndim < 2]
+			# pi_nonhidden_params = list(self.model._pi[-1].parameters())
+			# pi_param_groups = [
+			# 	dict(params=pi_hidden_weights, use_muon=True,
+			# 		lr=0.02, weight_decay=0.0),
+			# 	dict(params=pi_hidden_gains_biases+pi_nonhidden_params, use_muon=False,
+			# 		lr=self.cfg.lr, betas=(0.9, 0.999), weight_decay=0.0, eps=1e-5)]
+			# self.pi_optim = SingleDeviceMuonWithAuxAdam(pi_param_groups)
+
+			# muon3 
+			hidden_weights = [p for p in chain( \
+       								self.model._dynamics.parameters(), \
+									self.model._reward[:-1].parameters(), \
+           							self.model._terminated[:-1].parameters() if self.cfg.episodic else [] \
+                    				) if p.ndim >= 2]
+			hidden_gains_biases = [p for p in chain( \
+       								self.model._dynamics.parameters(), \
+									self.model._reward[:-1].parameters(), \
+               						self.model._terminated[:-1].parameters() if self.cfg.episodic else [] \
+                           			) if p.ndim < 2]
+			nonhidden_params = [
+       			*self.model._reward[-1].parameters(), \
+       			*(self.model._terminated[-1].parameters() if self.cfg.episodic else []), \
+              	*self.model._Qs.parameters()]
+			encoder_params = self.model._encoder.parameters()
+			param_groups = [
+				dict(params=hidden_weights, use_muon=True,
+					lr=self.cfg.muon_lr, weight_decay=self.cfg.muon_weight_decay),
+				dict(params=hidden_gains_biases+nonhidden_params, use_muon=False,
+					lr=self.cfg.lr, betas=(0.9, 0.999), weight_decay=0.0),
+				dict(params=encoder_params, use_muon=False,
+					lr=self.cfg.lr*self.cfg.enc_lr_scale, betas=(0.9, 0.999), weight_decay=0.0),
+				]
+			self.optim = SingleDeviceMuonWithAuxAdam(param_groups)
+
+			pi_hidden_weights = [p for p in self.model._pi[:-1].parameters() if p.ndim >= 2]
+			pi_hidden_gains_biases = [p for p in self.model._pi[:-1].parameters() if p.ndim < 2]
+			pi_nonhidden_params = list(self.model._pi[-1].parameters())
+			pi_param_groups = [
+				dict(params=pi_hidden_weights, use_muon=True,
+					lr=self.cfg.muon_lr, weight_decay=self.cfg.muon_weight_decay),
+				dict(params=pi_hidden_gains_biases+pi_nonhidden_params, use_muon=False,
+					lr=self.cfg.lr, betas=(0.9, 0.999), weight_decay=0.0, eps=1e-5)]
+			self.pi_optim = SingleDeviceMuonWithAuxAdam(pi_param_groups)
+			####################### use muon optimizer #########################
+		else:
+			####################### original optimizer #########################
+			params_list = [
+				{'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
+				{'params': self.model._dynamics.parameters()},
+				{'params': self.model._reward.parameters()},
+				{'params': self.model._Qs.parameters()},
+				{'params': self.model._task_emb.parameters() if self.cfg.multitask else []}
+			]
+			if self.cfg.episodic:
+				params_list.append({'params': self.model._terminated.parameters()})
+			self.optim = torch.optim.Adam(params_list, lr=self.cfg.lr, capturable=True)
+			self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr, eps=1e-5, capturable=True)
+			####################### original optimizer #########################
+
 		self.model.eval()
 		self.scale = RunningScale(cfg)
 		self.cfg.iterations += 2*int(cfg.action_dim >= 20) # Heuristic for large action spaces
@@ -40,8 +129,11 @@ class BMPC(torch.nn.Module):
 		) if self.cfg.multitask else self._get_discount(cfg.episode_length)
 		self._prev_mean = torch.nn.Buffer(torch.zeros(1, self.cfg.horizon, self.cfg.action_dim, device=self.device))
 		if cfg.compile:
-			print('Compiling update function with torch.compile...')
-			self._update = torch.compile(self._update, mode="reduce-overhead")
+			if self.cfg.use_muon:
+				print('Since the Muon optimizer is used, the update function will not be compiled with torch.compile.')
+			else:
+				print('Compiling update function with torch.compile...')
+				self._update = torch.compile(self._update, mode="reduce-overhead")
 		self.update_count = 0
 		self.reanalyze_count = 0
 
@@ -326,26 +418,25 @@ class BMPC(torch.nn.Module):
 
 		Gs, discount = 0, 1
 		zs_ = zs.clone()
-		# terminated = torch.zeros(batch_size, self.cfg.num_samples, 1, dtype=torch.float32, device=z.device)
+		terminated = torch.zeros(self.cfg.horizon, self.cfg.batch_size, 1, dtype=torch.float32, device=zs_.device)
 		for _ in range(self.cfg.td_horizon):
 			actions, _ = self.model.pi(zs_, task)
 			rewards = math.two_hot_inv(self.model.reward(zs_, actions, task), self.cfg)
 			zs_ = self.model.next(zs_, actions, task)
-			Gs += discount * rewards
-			# Gs += discount * (1-terminated) * rewards
+			Gs += discount * (1-terminated) * rewards
 			discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
 			discount = discount * discount_update
-			# if self.cfg.episodic:
-   			# 	terminated = torch.clip_(terminated + (self.model.terminated(z, task) > 0.5).float(), max=1.)
-		td_target = Gs + discount * self.model.V(zs_, task, return_type="avg", target=True)
-		# td_target = Gs + discount * (1-terminated) * self.model.V(zs_, task, return_type="avg", target=True)
+			if self.cfg.episodic:
+				terminated = torch.clip_(terminated + (self.model.terminated(zs_, task) > 0.5).float(), max=1.)
+		# td_target = Gs + discount * self.model.V(zs_, task, return_type="avg", target=True)
+		td_target = Gs + discount * (1-terminated) * self.model.V(zs_, task, return_type="avg", target=True)
 		return td_target
 	
-	# compute td-target-V not using model(will result major off-policy issue)
+	# compute td-target-V not using model(will result major off-policy issue and not support episodic)
 	@torch.no_grad()
-	def _td_target_V_2(self, next_z, reward, task):
+	def _td_target_V_2(self, next_z, reward, terminated, task):
 		discount = self.discount[task].unsqueeze(-1) if self.cfg.multitask else self.discount
-		return reward + discount * self.model.V(next_z, task, return_type='min', target=True)
+		return reward + discount * (1-terminated) * self.model.V(next_z, task, return_type='avg', target=True)
  
 
 	def _update(self, obs, action, reward, terminated, expert_action_dist, reanalyze_age, task=None, pretrain=False):
@@ -355,7 +446,7 @@ class BMPC(torch.nn.Module):
 			next_z = true_zs[1:]
 			if self.cfg.use_v_instead_q:
 				td_targets = self._td_target_V(true_zs[:-1], task)
-				# td_targets = self._td_target_V_2(next_z, reward, task)
+				# td_targets = self._td_target_V_2(next_z, reward, terminated, task)
 			else:
 				td_targets = self._td_target_Q(next_z, reward, terminated, task)
 	
@@ -463,7 +554,8 @@ class BMPC(torch.nn.Module):
 		kwargs = {"pretrain": pretrain}
 		if task is not None:
 			kwargs["task"] = task
-		torch.compiler.cudagraph_mark_step_begin()
+		if not self.cfg.use_muon:
+			torch.compiler.cudagraph_mark_step_begin()
 		return self._update(obs, action, reward, terminated, expert_action_dist, reanalyze_age, **kwargs)
 
 	@torch.no_grad()

@@ -84,7 +84,7 @@ def parse_cfg(cfg: OmegaConf) -> OmegaConf:
 	if not cfg.bmpc:
 		cfg.use_v_instead_q = False
 	assert not (cfg.bmpc and cfg.multitask), "BMPC does not support multi-task for now."
-	assert not (cfg.use_tensorboard and cfg.enable_wandb), "You can only choose either WandB or TensorBoard."
+	assert not (cfg.use_tensorboard and cfg.enable_wandb), "you can only choose either WandB or TensorBoard."
 	assert not (cfg.episodic and not ('humanoid_h1' in cfg.task)), "episodic only supports HumanoidBench for now."
 	assert not (cfg.episodic and not cfg.bmpc), "episodic only supports BMPC for now."
 

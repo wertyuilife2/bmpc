@@ -35,6 +35,7 @@ dependencies:
     - pandas==2.0.3
     - wandb==0.17.4
     - tensorboard==2.18.0
+    - git+https://github.com/KellerJordan/Muon # Muon optimizer
     ####################
     # Gym:
     # (unmaintained but required for maniskill2/meta-world)

@@ -31,6 +31,10 @@ expl_log_std_min: -2
 expl_log_std_max: 1
 ## imitaiton discount
 imitation_discount: 1
+## muon optimizer
+use_muon: false
+muon_lr: 0.02
+muon_weight_decay: 0.01
 
 # training
 steps: 10_000_000
