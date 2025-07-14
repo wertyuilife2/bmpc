@@ -1,5 +1,6 @@
 import torch.nn as nn
-
+from tensordict.nn import TensorDictParams
+from common import layers
 
 def weight_init(m):
 	"""Custom weight initialization for TD-MPC2."""
@@ -14,6 +15,14 @@ def weight_init(m):
 			if p.dim() == 3: # Linear
 				nn.init.trunc_normal_(p, std=0.02) # Weight
 				nn.init.constant_(m[i+1], 0) # Bias
+	elif isinstance(m, layers.Ensemble): # fix the issue in https://github.com/nicklashansen/tdmpc2/issues/72
+		# print("Q detected.", flush=True)
+		nn.init.trunc_normal_(m.params["0","weight"], std=0.02)
+		nn.init.trunc_normal_(m.params["1","weight"], std=0.02)
+		nn.init.trunc_normal_(m.params["2","weight"], std=0.02)
+		nn.init.constant_(m.params["0","bias"], 0)
+		nn.init.constant_(m.params["1","bias"], 0)
+		nn.init.constant_(m.params["2","bias"], 0)
 
 
 def zero_(params):
