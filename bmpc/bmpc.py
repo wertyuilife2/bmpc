@@ -360,7 +360,7 @@ class BMPC(torch.nn.Module):
 			act_dist = TanhNormal(loc=info["raw_mean"], scale=info["log_std"].exp())
 			logp_loss = -act_dist.log_prob(exp_means).unsqueeze(-1)
 			self.scale.update(logp_loss[0])
-			logp_loss = self.scale(logp_loss)   
+			logp_loss = self.scale(logp_loss)
 			rho = torch.pow(self.cfg.rho, torch.arange(len(logp_loss), device=self.device))
 			pi_loss = ((logp_loss - self.cfg.entropy_coef * info["entropy"]).mean(dim=(1,2)) * rho).mean()
 		elif self.cfg.policy_loss_type == "mse": # not using imitation discount for now
@@ -511,7 +511,8 @@ class BMPC(torch.nn.Module):
   
 		# Update policy
 		if not pretrain:
-			pi_info = self.update_pi(zs.detach(), expert_action_dist, reanalyze_age, task)
+			zs_p = true_zs.detach() if self.cfg.ora_ei else zs.detach()
+			pi_info = self.update_pi(zs_p, expert_action_dist, reanalyze_age, task)
 			info.update(pi_info)
 
 		# Update target Q-functions

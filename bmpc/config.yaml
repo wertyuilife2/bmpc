@@ -22,6 +22,7 @@ td_horizon: 1
 ## policy learning
 policy_loss_type: kl # 'kl' / 'log_prob' / 'mse'
 policy_type: tanh_normal # 'tanh_normal' / '5tanh_normal', only works when policy_loss_type==log_prob
+ora_ei: false # use true latent from obs, not dynamic model, for expert imitation.
 ## lazy reanalyze
 reanalyze_interval: 10 # 0 means never reanalyze
 reanalyze_batch_size: 20 # samples that will be reanalyzed in a batch (should <= batch_size)
