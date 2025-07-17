@@ -295,11 +295,18 @@ class BMPC(torch.nn.Module):
 			actions[:, :, :self.cfg.num_pi_trajs] = pi_actions
 	
 		# Iterate MPPI
+		num_expl_samples = int((self.cfg.num_samples-self.cfg.num_pi_trajs) * self.cfg.expl_frac)
+		num_main_samples = self.cfg.num_samples - self.cfg.num_pi_trajs - num_expl_samples
 		for _ in range(self.cfg.iterations):
 
 			# Sample actions
 			r = torch.randn(batch_size, horizon, self.cfg.num_samples-self.cfg.num_pi_trajs, self.cfg.action_dim, device=std.device)
-			actions_sample = mean.unsqueeze(2) + std.unsqueeze(2) * r
+			if num_expl_samples > 0:
+				main_actions_sample = mean.unsqueeze(2) + std.unsqueeze(2) * r[:,:,num_main_samples:,:]
+				expl_actions_sample = mean.unsqueeze(2) + self.cfg.max_std * r[:,:,:num_expl_samples,:]
+				actions_sample = torch.cat([main_actions_sample, expl_actions_sample], dim=2)
+			else:
+				actions_sample = mean.unsqueeze(2) + std.unsqueeze(2) * r
 			actions_sample = actions_sample.clamp(-1, 1)
 			actions[:, :, self.cfg.num_pi_trajs:] = actions_sample
 			if self.cfg.multitask:

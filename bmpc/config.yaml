@@ -66,6 +66,7 @@ horizon: 3
 min_std: 0.05
 max_std: 2
 temperature: 0.5
+expl_frac: 0 # fraction of samples to keep at max_std
 
 # actor
 log_std_min: -3
