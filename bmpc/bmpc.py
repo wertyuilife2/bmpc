@@ -360,8 +360,11 @@ class BMPC(torch.nn.Module):
 			self.scale.update(kl_loss[0])
 			kl_loss = self.scale(kl_loss)
 			imitation_scale = self.cfg.imitation_discount ** reanalyze_age
-			rho = torch.pow(self.cfg.rho, torch.arange(len(kl_loss), device=self.device))
-			pi_loss = ((imitation_scale*(kl_loss - self.cfg.entropy_coef * info["scaled_entropy"])).mean(dim=(1,2)) * rho).mean()
+			if self.cfg.ora_ei:
+				pi_loss = (imitation_scale*(kl_loss - self.cfg.entropy_coef * info["scaled_entropy"])).mean()
+			else:
+				rho = torch.pow(self.cfg.rho, torch.arange(len(kl_loss), device=self.device))
+				pi_loss = ((imitation_scale*(kl_loss - self.cfg.entropy_coef * info["scaled_entropy"])).mean(dim=(1,2)) * rho).mean()
 		elif self.cfg.policy_loss_type == "log_prob": # not using imitation discount for now
 			exp_means, _ = expert_action_dist.chunk(2, dim=-1)
 			act_dist = TanhNormal(loc=info["raw_mean"], scale=info["log_std"].exp())
