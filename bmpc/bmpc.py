@@ -30,24 +30,24 @@ class BMPC(torch.nn.Module):
 			# muon1
 			# hidden_weights = [p for p in self.model._dynamics.parameters() if p.ndim >= 2]
 			# hidden_gains_biases = [p for p in self.model._dynamics.parameters() if p.ndim < 2]
-			# nonhidden_params = list(self.model._reward.parameters()) + \
-			# 	list(self.model._Qs.parameters()) + \
+			# nonhidden_params = list(self.model._reward.parameters()) +
+			# 	list(self.model._Qs.parameters()) +
 			#     (list(self.model._task_emb.parameters()) if self.cfg.multitask else [])
 			# encoder_params = self.model._encoder.parameters()
 			# ....
 
 			# muon2
-			# hidden_weights = [p for p in chain(self.model._dynamics.parameters(), \
+			# hidden_weights = [p for p in chain(self.model._dynamics.parameters(),
 			# 				self.model._reward[:-1].parameters()) if p.ndim >= 2]
 			# hidden_weights += [self.model._Qs.params["0","weight"], self.model._Qs.params["1","weight"]]
-			# hidden_gains_biases = [p for p in chain(self.model._dynamics.parameters(), \
+			# hidden_gains_biases = [p for p in chain(self.model._dynamics.parameters(),
 			# 						self.model._reward[:-1].parameters()) if p.ndim < 2]
 			# # The ln.weight of the ensemble Q is a concatenation of number Q tensors, so its ndim=2.
 			# # Therefore, we can't filter it out using ndim<2 and need to handle it separately in Adam.
 			# # (Besides, it's also difficult to iterate over the parameters of the ensemble directly.)
-			# hidden_gains_biases += [self.model._Qs.params["0","bias"], self.model._Qs.params["1","bias"], \
+			# hidden_gains_biases += [self.model._Qs.params["0","bias"], self.model._Qs.params["1","bias"],
 			# 	*list(self.model._Qs.params["0","ln"].values()), *list(self.model._Qs.params["1","ln"].values())]
-			# nonhidden_params = [*self.model._reward[-1].parameters(), \
+			# nonhidden_params = [*self.model._reward[-1].parameters(),
 			# 			self.model._Qs.params["2","weight"], self.model._Qs.params["2","bias"]]
 			# encoder_params = self.model._encoder.parameters()
 			# param_groups = [
@@ -70,20 +70,20 @@ class BMPC(torch.nn.Module):
 			# 		lr=self.cfg.lr, betas=(0.9, 0.999), weight_decay=0.0, eps=1e-5)]
 			# self.pi_optim = SingleDeviceMuonWithAuxAdam(pi_param_groups)
 
-			# muon3 
-			hidden_weights = [p for p in chain( \
-       								self.model._dynamics.parameters(), \
-									self.model._reward[:-1].parameters(), \
-           							self.model._terminated[:-1].parameters() if self.cfg.episodic else [] \
+			# muon3
+			hidden_weights = [p for p in chain(
+       								self.model._dynamics.parameters(),
+									self.model._reward[:-1].parameters(),
+           							self.model._terminated[:-1].parameters() if self.cfg.episodic else []
                     				) if p.ndim >= 2]
-			hidden_gains_biases = [p for p in chain( \
-       								self.model._dynamics.parameters(), \
-									self.model._reward[:-1].parameters(), \
-               						self.model._terminated[:-1].parameters() if self.cfg.episodic else [] \
+			hidden_gains_biases = [p for p in chain(
+       								self.model._dynamics.parameters(),
+									self.model._reward[:-1].parameters(),
+               						self.model._terminated[:-1].parameters() if self.cfg.episodic else []
                            			) if p.ndim < 2]
 			nonhidden_params = [
-       			*self.model._reward[-1].parameters(), \
-       			*(self.model._terminated[-1].parameters() if self.cfg.episodic else []), \
+       			*self.model._reward[-1].parameters(),
+       			*(self.model._terminated[-1].parameters() if self.cfg.episodic else []),
               	*self.model._Qs.parameters()]
 			encoder_params = self.model._encoder.parameters()
 			param_groups = [
@@ -212,7 +212,7 @@ class BMPC(torch.nn.Module):
 		action, pi_info = self.model.pi(z, task)
 		if eval_mode:
 			action = pi_info["mean"]
-		return action[0].cpu(), None
+		return action[0,0].cpu() if self.cfg.action_chunk else action[0].cpu(), None
 
 	@torch.no_grad()
 	def _estimate_value(self, batch_size, z, actions, task, horizon):
@@ -231,6 +231,8 @@ class BMPC(torch.nn.Module):
 			return G + discount * (1-terminated) * self.model.V(z, task, return_type="avg")
 		else:
 			action, _ = self.model.pi(z, task)
+			if self.cfg.action_chunk:
+				action = action.flatten(-2) # flatten the chunk dim
 			return G + discount * (1-terminated) * self.model.Q(z, action, task, return_type='avg')
 
 	# soft episodic planning
@@ -251,6 +253,8 @@ class BMPC(torch.nn.Module):
 	# 		return G + discount * self.model.V(z, task, return_type="avg")
 	# 	else:
 	# 		action, _ = self.model.pi(z, task)
+	# 		if self.cfg.action_chunk:
+	# 			action = action.flatten(-2) # flatten the chunk dim
 	# 		return G + discount * self.model.Q(z, action, task, return_type='avg')
 
 	@torch.no_grad()
@@ -277,12 +281,17 @@ class BMPC(torch.nn.Module):
 		# Sample policy trajectories
 		z = self.model.encode(obs, task)
 		if self.cfg.num_pi_trajs > 0:
-			pi_actions = torch.empty(batch_size, horizon, self.cfg.num_pi_trajs, self.cfg.action_dim, device=self.device)
-			_z = z.unsqueeze(1).repeat(1, self.cfg.num_pi_trajs, 1)
-			for t in range(horizon-1):
-				pi_actions[:,t], _ = self.model.pi(_z, task, expl=reanalyze)
-				_z = self.model.next(_z, pi_actions[:,t], task)
-			pi_actions[:,-1], _ = self.model.pi(_z, task, expl=reanalyze)
+			if self.cfg.action_chunk:
+				_z = z.unsqueeze(1).repeat(1, self.cfg.num_pi_trajs, 1)
+				pi_actions, _ = self.model.pi(_z, task, expl=reanalyze)
+				pi_actions = pi_actions.permute(0,2,1,3)
+			else:
+				pi_actions = torch.empty(batch_size, horizon, self.cfg.num_pi_trajs, self.cfg.action_dim, device=self.device)
+				_z = z.unsqueeze(1).repeat(1, self.cfg.num_pi_trajs, 1)
+				for t in range(horizon-1):
+					pi_actions[:,t], _ = self.model.pi(_z, task, expl=reanalyze)
+					_z = self.model.next(_z, pi_actions[:,t], task)
+				pi_actions[:,-1], _ = self.model.pi(_z, task, expl=reanalyze)
 
 		# Initialize state and parameters
 		z = z.unsqueeze(1).repeat(1, self.cfg.num_samples, 1)
@@ -316,24 +325,27 @@ class BMPC(torch.nn.Module):
 			value = self._estimate_value(batch_size, z, actions, task, horizon).nan_to_num(0)
 			elite_idxs = torch.topk(value.squeeze(2), self.cfg.num_elites, dim=1).indices
 			elite_value = torch.gather(value, 1, elite_idxs.unsqueeze(2))
-			elite_actions = torch.gather(actions, 2, elite_idxs.unsqueeze(1).unsqueeze(3).expand(-1, horizon, -1, self.cfg.action_dim))
+			elite_actions = torch.gather(actions, 2, elite_idxs[:, None, :, None].expand(
+       			-1, horizon, self.cfg.num_elites, self.cfg.action_dim))
 
 			# Update parameters
-			max_value = elite_value.max(1).values
-			score = torch.exp(self.cfg.temperature*(elite_value - max_value.unsqueeze(1)))
-			score = (score / score.sum(1, keepdim=True))
-			mean = (score.unsqueeze(1) * elite_actions).sum(2) / (score.sum(1, keepdim=True) + 1e-9)
-			std = ((score.unsqueeze(1) * (elite_actions - mean.unsqueeze(2)) ** 2).sum(2) / (score.sum(1, keepdim=True) + 1e-9)).sqrt()
-			std = std.clamp(self.cfg.min_std, self.cfg.max_std)
+			score = torch.exp(self.cfg.temperature*(elite_value - elite_value.max(1, keepdim=True).values))
+			score = (score / (score.sum(1, keepdim=True) + 1e-9)).unsqueeze(1)
+			mean = (score * elite_actions).sum(2) / (score.sum(2) + 1e-9)
+			std = ((score * (elite_actions - mean.unsqueeze(2)) ** 2).sum(2) /
+       			(score.sum(2) + 1e-9)).sqrt().clamp(self.cfg.min_std, self.cfg.max_std)
 			if self.cfg.multitask:
 				mean = mean * self.model._action_masks[task]
 				std = std * self.model._action_masks[task]
 
 		# Select action
-		rand_idx = math.gumbel_softmax_sample(score.squeeze(2), dim=1)  # gumbel_softmax_sample is compatible with cuda graphs
+		rand_idx = math.gumbel_softmax_sample(score.squeeze(1,3), dim=1)  # gumbel_softmax_sample is compatible with cuda graphs
 		actions = elite_actions[torch.arange(batch_size), :, rand_idx]
 		action_value = elite_value[torch.arange(batch_size), rand_idx]
-		action_dist = torch.cat([actions[:,0],std[:,0]], dim=-1)
+		if self.cfg.action_chunk:
+			action_dist = torch.cat([actions,std], dim=-1) # chunked expert action distribution
+		else:
+			action_dist = torch.cat([actions[:,0],std[:,0]], dim=-1)
 		action, std = actions[:, 0], std[:, 0]
 		if not eval_mode:
 			action = action + std * torch.randn(self.cfg.action_dim, device=std.device)
@@ -354,7 +366,19 @@ class BMPC(torch.nn.Module):
 			float: Loss of the policy update.
 		"""
 		action, info = self.model.pi(zs[:-1], task)
-		if self.cfg.policy_loss_type == "kl":
+		if self.cfg.action_chunk:
+			assert self.cfg.policy_loss_type == "kl"
+			actions_dist = torch.cat([info["mean"], info["log_std"].exp()], dim=-1)
+			kl_loss = math.kl_div(actions_dist, expert_action_dist).mean(-1, keepdim=True)
+			self.scale.update(kl_loss[0,:,0,:]) # kl_loss.shape: (horizon, batchsize, action_chunk_size, 1)
+			kl_loss = self.scale(kl_loss)
+			imitation_scale = (self.cfg.imitation_discount ** reanalyze_age).unsqueeze(2)
+			if self.cfg.ora_ei:
+				pi_loss = (imitation_scale*(kl_loss - self.cfg.entropy_coef * info["scaled_entropy"])).mean()
+			else:
+				rho = torch.pow(self.cfg.rho, torch.arange(len(kl_loss), device=self.device))
+				pi_loss = ((imitation_scale*(kl_loss - self.cfg.entropy_coef * info["scaled_entropy"])).mean(dim=(1,2,3)) * rho).mean()
+		elif self.cfg.policy_loss_type == "kl":
 			actions_dist = torch.cat([info["mean"], info["log_std"].exp()], dim=-1)
 			kl_loss = math.kl_div(actions_dist, expert_action_dist).mean(-1, keepdim=True)
 			self.scale.update(kl_loss[0])
@@ -412,7 +436,25 @@ class BMPC(torch.nn.Module):
 		action, _ = self.model.pi(next_z, task)
 		discount = self.discount[task].unsqueeze(-1) if self.cfg.multitask else self.discount
 		return reward + discount * (1-terminated) * self.model.Q(next_z, action, task, return_type='min', target=True)
-	
+	@torch.no_grad()
+	def _chunked_td_target_Q(self, next_z, reward, terminated, task):
+		"""
+		Compute the chunked TD-target for Q-value updates.
+
+		Args:
+			next_z (torch.Tensor): Latent state at the following time step.
+			reward (torch.Tensor): Reward at the current time step.
+			terminated (torch.Tensor): Termination signal at the current time step.
+			task (torch.Tensor): Task index (only used for multi-task experiments).
+
+		Returns:
+			torch.Tensor: TD-target.
+		"""
+		action, _ = self.model.pi(next_z[-1], task)
+		action = action.flatten(-2) # flatten the chunk dim
+		disc = torch.pow(self.discount, torch.arange(self.cfg.action_chunk_size, device=reward.device))
+		G = (reward * disc[:,None,None]).sum(0)
+		return G + self.discount**self.cfg.action_chunk_size * (1-terminated[-1]) * self.model.Q(next_z[-1], action, task, return_type='min', target=True)
 	@torch.no_grad()
 	def _td_target_V(self, zs, task):
 		"""
@@ -438,7 +480,6 @@ class BMPC(torch.nn.Module):
 			discount = discount * discount_update
 			if self.cfg.episodic:
 				terminated = torch.clip_(terminated + (self.model.terminated(zs_, task) > 0.5).float(), max=1.)
-		# td_target = Gs + discount * self.model.V(zs_, task, return_type="avg", target=True)
 		td_target = Gs + discount * (1-terminated) * self.model.V(zs_, task, return_type="avg", target=True)
 		return td_target
 	
@@ -454,7 +495,9 @@ class BMPC(torch.nn.Module):
 		with torch.no_grad():
 			true_zs = self.model.encode(obs, task) # latent from real obs
 			next_z = true_zs[1:]
-			if self.cfg.use_v_instead_q:
+			if self.cfg.action_chunk:
+				td_targets = self._chunked_td_target_Q(next_z, reward, terminated, task)
+			elif self.cfg.use_v_instead_q:
 				td_targets = self._td_target_V(true_zs[:-1], task)
 				# td_targets = self._td_target_V_2(next_z, reward, terminated, task)
 			else:
@@ -475,7 +518,10 @@ class BMPC(torch.nn.Module):
 
 		# Predictions
 		_zs = zs[:-1]
-		if self.cfg.use_v_instead_q:
+		if self.cfg.action_chunk:
+			_action = action.permute(1, 0, 2).reshape(self.cfg.batch_size, self.cfg.action_chunk_size * self.cfg.action_dim)
+			qs = self.model.Q(_zs[0], _action, task, return_type='all')
+		elif self.cfg.use_v_instead_q:
 			qs = self.model.V(_zs, task, return_type='all')
 		else:
 			qs = self.model.Q(_zs, action, task, return_type='all')
@@ -485,16 +531,22 @@ class BMPC(torch.nn.Module):
 
 		# Compute losses
 		reward_loss, terminated_loss, value_loss = 0, 0, 0
-		for t, (rew_pred_unbind, rew_unbind, td_targets_unbind, qs_unbind) in enumerate(zip(reward_preds.unbind(0), reward.unbind(0), td_targets.unbind(0), qs.unbind(1))):
-			reward_loss = reward_loss + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
-			for _, qs_unbind_unbind in enumerate(qs_unbind.unbind(0)):
-				value_loss = value_loss + math.soft_ce(qs_unbind_unbind, td_targets_unbind, self.cfg).mean() * self.cfg.rho**t
+		if self.cfg.action_chunk:
+			for t, (rew_pred_unbind, rew_unbind) in enumerate(zip(reward_preds.unbind(0), reward.unbind(0))):
+				reward_loss = reward_loss + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
+			for _, qs_unbind_unbind in enumerate(qs.unbind(0)):
+				value_loss = value_loss + math.soft_ce(qs_unbind_unbind, td_targets, self.cfg).mean()
+		else:
+			for t, (rew_pred_unbind, rew_unbind, td_targets_unbind, qs_unbind) in enumerate(zip(reward_preds.unbind(0), reward.unbind(0), td_targets.unbind(0), qs.unbind(1))):
+				reward_loss = reward_loss + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
+				for _, qs_unbind_unbind in enumerate(qs_unbind.unbind(0)):
+					value_loss = value_loss + math.soft_ce(qs_unbind_unbind, td_targets_unbind, self.cfg).mean() * self.cfg.rho**t
 		if self.cfg.episodic:
 			terminated_loss = terminated_loss + F.binary_cross_entropy(terminated_preds, terminated[-1,:,:])
 
 		consistency_loss = consistency_loss / self.cfg.horizon
 		reward_loss = reward_loss / self.cfg.horizon
-		value_loss = value_loss / (self.cfg.horizon * self.cfg.num_q)
+		value_loss = value_loss / ((1 if self.cfg.action_chunk else self.cfg.horizon) * self.cfg.num_q)
 		total_loss = (
 			self.cfg.consistency_coef * consistency_loss +
 			self.cfg.reward_coef * reward_loss +
@@ -549,8 +601,8 @@ class BMPC(torch.nn.Module):
 		# If imitating the expert value, should also apply preprocessing here.
 		mean, std = expert_action_dist.chunk(2, dim=-1)
 		nan_idx = torch.isnan(mean) # samples which are not generated by mpc policy
-		mean[nan_idx] = torch.zeros_like(action[nan_idx])
-		std[nan_idx] = torch.ones_like(action[nan_idx])
+		mean[nan_idx] = 0
+		std[nan_idx] = 1
 		expert_action_dist = torch.cat([mean, std],dim=-1)
   
 		# lazy reanalyze
@@ -580,7 +632,7 @@ class BMPC(torch.nn.Module):
 		# re-plan
 		obs_ = obs[:-1,:self.cfg.reanalyze_batch_size].reshape(self.cfg.horizon*self.cfg.reanalyze_batch_size, *obs.shape[2:])
 		torch.compiler.cudagraph_mark_step_begin()
-		_, plan_info = self.plan(obs_, self.cfg.horizon*self.cfg.reanalyze_batch_size, \
+		_, plan_info = self.plan(obs_, self.cfg.horizon*self.cfg.reanalyze_batch_size,
       		t0=True, task=task, horizon=self.cfg.reanalyze_horizon, update_prev_mean=False, reanalyze=True)
 
 		# Update reanalyzed data to buffer
@@ -592,4 +644,6 @@ class BMPC(torch.nn.Module):
 				plan_info["action_value"].flatten().to(buffer._buffer._storage.device)
 			buffer._buffer._storage._storage['last_reanalyze'][index_list] = self.reanalyze_count
 		self.model.train()
+		if self.cfg.action_chunk:
+			return plan_info["action_dist"].view(self.cfg.horizon, self.cfg.reanalyze_batch_size, self.cfg.action_chunk_size, -1)
 		return plan_info["action_dist"].view(self.cfg.horizon, self.cfg.reanalyze_batch_size, -1)

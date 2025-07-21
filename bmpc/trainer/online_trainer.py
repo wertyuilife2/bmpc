@@ -62,8 +62,9 @@ class OnlineTrainer(Trainer):
 		if terminated is None:
 			terminated = torch.tensor(float('nan'))   
 		expert_value = act_info.get("action_value", torch.tensor(float('nan'))).squeeze().unsqueeze(0)
+		_action_size = (1, self.cfg.action_chunk_size, 2*self.cfg.action_dim) if self.cfg.action_chunk else (1, 2*self.cfg.action_dim)
 		expert_action_dist = act_info.get("action_dist", \
-	  		torch.full(size=(1, 2*self.cfg.action_dim), fill_value=float('nan')))
+	  		torch.full(size=_action_size, fill_value=float('nan')))
 		last_reanalyze = act_info.get("last_reanalyze", torch.zeros((1,)))
 		td = TensorDict(dict(
 			obs=obs,

@@ -87,7 +87,9 @@ def parse_cfg(cfg: OmegaConf) -> OmegaConf:
 	assert not (cfg.use_tensorboard and cfg.enable_wandb), "you can only choose either WandB or TensorBoard."
 	assert not (cfg.episodic and not ('humanoid_h1' in cfg.task)), "episodic only supports HumanoidBench for now."
 	assert not (cfg.episodic and not cfg.bmpc), "episodic only supports BMPC for now."
-
+	assert not (cfg.action_chunk and cfg.use_v_instead_q), "action_chunk only works when using Q-network"
+	assert not (cfg.action_chunk and not (cfg.action_chunk_size==cfg.horizon==cfg.reanalyze_horizon)), \
+ 		"we currently support action_chunk only for expert imitation, so its size must equal both horizon and reanalyze_horizon."
 	return cfg_to_dataclass(cfg)
 
 def save_cfg(cfg: OmegaConf, dir):

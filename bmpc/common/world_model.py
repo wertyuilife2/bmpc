@@ -27,11 +27,12 @@ class WorldModel(nn.Module):
 		self._reward = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
 		if cfg.episodic:
 			self._terminated = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 1)
-		self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
+		_act_size = cfg.action_dim * cfg.action_chunk_size if cfg.action_chunk else cfg.action_dim
+		self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*_act_size)
 		if self.cfg.use_v_instead_q:
 			self._Qs = layers.Ensemble([layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
 		else:
-			self._Qs = layers.Ensemble([layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
+			self._Qs = layers.Ensemble([layers.mlp(cfg.latent_dim + _act_size + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
 		self.apply(init.weight_init)
 		init.zero_([self._reward[-1].weight, self._Qs.params["2", "weight"]])
 
@@ -158,7 +159,12 @@ class WorldModel(nn.Module):
 			z = self.task_emb(z, task)
 
 		# Gaussian policy prior
-		raw_mean, log_std = self._pi(z).chunk(2, dim=-1)
+		if self.cfg.action_chunk:
+			_acts = self._pi(z)
+			raw_mean, log_std = _acts.reshape(*_acts.shape[:-1], \
+       			self.cfg.action_chunk_size, 2*self.cfg.action_dim).chunk(2, dim=-1)
+		else:
+			raw_mean, log_std = self._pi(z).chunk(2, dim=-1)
 		raw_std = log_std # for policy_type == "5tanh_normal"
 
 		if expl:

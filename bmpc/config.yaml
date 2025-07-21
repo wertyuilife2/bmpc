@@ -16,13 +16,16 @@ bmpc: true
 ## logging
 use_tensorboard: true
 eval_pi: false
+## action chunk
+action_chunk: false # only work when use_v_instead_q=false, and will ingnore policy_loss_type(for now)
+action_chunk_size: 3 # when using expert imitation, action_chunk_size must be equal to horizon and reanalyze_horizon
 ## value learning
 use_v_instead_q: true # using V with model-based TD-learning / using Q with model-free TD-learning 
 td_horizon: 1
 ## policy learning
 policy_loss_type: kl # 'kl' / 'log_prob' / 'mse'
 policy_type: tanh_normal # 'tanh_normal' / '5tanh_normal', only works when policy_loss_type==log_prob
-ora_ei: false # use true latent from obs, not dynamic model, for expert imitation.
+ora_ei: false # (only work with policy_loss_type=kl) use true latent from obs, not dynamic model, for expert imitation.
 ## lazy reanalyze
 reanalyze_interval: 10 # 0 means never reanalyze
 reanalyze_batch_size: 20 # samples that will be reanalyzed in a batch (should <= batch_size)
@@ -31,7 +34,7 @@ reanalyze_horizon: 3
 expl_log_std_min: -2
 expl_log_std_max: 1
 ## imitaiton discount
-imitation_discount: 1
+imitation_discount: 1 # only used when policy_loss_type == 'kl'
 ## muon optimizer
 use_muon: false
 muon_lr: 0.02
